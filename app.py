@@ -190,10 +190,10 @@ It is a {final_verdict_decision}, please make the draft accordingly in blockcode
 """
 
 # --- UI STREAMLIT ---
-st.set_page_config(page_title="SOC Threat Intel AI", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", layout="wide")
 
-st.title("🛡️ SOC Threat Intel AI Dashboard")
-st.markdown("Otomatisasi pengumpulan intelijen ancaman dan pembuatan laporan akhir menggunakan Gemini AI.")
+st.title("🛡️ SOC Threat Inteligent Dashboard")
+st.markdown("Automation gathering threat intelligent and report @wildaaan.")
 
 # Sidebar untuk konfigurasi API
 st.sidebar.header("🔑 Konfigurasi API")
@@ -282,7 +282,7 @@ if submit_button:
             st.success(f"Analisis Selesai!")
             
             # Menampilkan Laporan Akhir
-            st.subheader("📝 Laporan Akhir (Siap Copy):")
+            st.subheader("📝 Laporan Akhir :")
             st.text_area("Silakan copy (atau edit) teks di bawah ini:", value=final_report_text, height=400)
             
             # --- TAMBAHAN: Tombol Download Prompt Mentah (Fallback) ---
@@ -293,7 +293,9 @@ if submit_button:
                 file_name=filename,
                 mime="text/plain"
             )
+            st.text_area("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and 				also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any 				text formatting and without any cite in domain related to gambling website", height=400)
             st.markdown("<br>", unsafe_allow_html=True) # Memberi sedikit jarak
+		
             
             # Tampilkan Data Mentah
             with st.expander("Lihat Raw JSON Data (Klik untuk membuka)"):
