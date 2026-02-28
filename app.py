@@ -195,15 +195,23 @@ st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", 
 st.title("🛡️ SOC Threat Inteligent Dashboard")
 st.markdown("Automation gathering threat intelligent and report @wildaaan.")
 
-# Sidebar untuk konfigurasi API
+# --- AMBIL DATA DARI STREAMLIT SECRETS ---
+# st.secrets.get() akan mengambil key jika ada, atau mengosongkan ("") jika belum diatur
+ENV_GEMINI = st.secrets.get("GEMINI_API_KEY", "")
+ENV_VT = st.secrets.get("VT_API_KEY", "")
+ENV_ABUSE = st.secrets.get("ABUSEIPDB_API_KEY", "")
+ENV_URLSCAN = st.secrets.get("URLSCAN_API_KEY", "")
+ENV_HYBRID = st.secrets.get("HYBRID_API_KEY", "")
+
+# --- SIDEBAR KONFIGURASI API ---
 st.sidebar.header("🔑 Konfigurasi API")
-gemini_key = st.sidebar.text_input("Gemini API Key (Wajib)", type="password")
+gemini_key = st.sidebar.text_input("Gemini API Key (Wajib)", type="password", value=ENV_GEMINI)
 st.sidebar.markdown("---")
-vt_key = st.sidebar.text_input("VirusTotal API Key (Wajib)", type="password")
-abuse_key = st.sidebar.text_input("AbuseIPDB API Key (Wajib)", type="password")
+vt_key = st.sidebar.text_input("VirusTotal API Key (Wajib)", type="password", value=ENV_VT)
+abuse_key = st.sidebar.text_input("AbuseIPDB API Key (Wajib)", type="password", value=ENV_ABUSE)
 st.sidebar.markdown("---")
-urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password")
-hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password")
+urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password", value=ENV_URLSCAN)
+hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # Form Input Utama
 with st.form("ioc_form"):
@@ -272,7 +280,7 @@ if submit_button:
                         http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
                     )
                     response = client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-2.5-flash',
                         contents=final_prompt,
                     )
                     final_report_text = response.text
@@ -282,8 +290,8 @@ if submit_button:
             st.success(f"Analisis Selesai!")
             
             # Menampilkan Laporan Akhir
-            st.subheader("📝 Laporan Akhir :")
-            st.text_area("Silakan copy (atau edit) teks di bawah ini:", value=final_report_text, height=400)
+            st.subheader("📝 Final Report :")
+            st.text_area("Copy atau edit teks di bawah ini:", value=final_report_text, height=400)
             
             # --- TAMBAHAN: Tombol Download Prompt Mentah (Fallback) ---
             filename = f"prompt_{ioc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -293,10 +301,10 @@ if submit_button:
                 file_name=filename,
                 mime="text/plain"
             )
-            st.text_area("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and 				also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any 				text formatting and without any cite in domain related to gambling website", height=400)
+            st.markdown("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling website")
             st.markdown("<br>", unsafe_allow_html=True) # Memberi sedikit jarak
 		
             
             # Tampilkan Data Mentah
-            with st.expander("Lihat Raw JSON Data (Klik untuk membuka)"):
+            with st.expander("See Raw JSON Data"):
                 st.code(collated, language='json')
