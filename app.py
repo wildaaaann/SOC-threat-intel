@@ -134,8 +134,13 @@ def query_hybridanalysis(ioc, ioc_type, api_key):
     if not api_key: return '{"error": "HybridAnalysis API key not configured."}'
     if ioc_type not in ["md5", "sha1", "sha256"]: return ""
     try:
-        headers = {'api-key': api_key, 'User-Agent': 'Falcon Sandbox'}
-        response = requests.post("https://www.hybrid-analysis.com/api/v2/search/hash", headers=headers, data={'hash': ioc}, timeout=15, verify=False)
+        # Tambahkan Content-Type dan hapus 'www.' pada URL
+        headers = {
+            'api-key': api_key, 
+            'User-Agent': 'Falcon Sandbox',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        response = requests.post("https://hybrid-analysis.com/api/v2/search/hash", headers=headers, data={'hash': ioc}, timeout=15, verify=False)
         response.raise_for_status()
         results = response.json()
         if results and isinstance(results, list) and len(results) > 0:
@@ -186,22 +191,34 @@ Threat Intelligence Data (JSON):
 --- END OF DATA ---
 
 Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. 
-It is a {final_verdict_decision}, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling website.
+It is a {final_verdict_decision}, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website.
 """
+
+# --- INISIALISASI SESSION STATE UNTUK HISTORY ---
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 # --- UI STREAMLIT ---
 st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", layout="wide")
 
-st.title("🛡️ SOC Threat Inteligent Dashboard")
-st.markdown("Automation gathering threat intelligent and report @wildaaan.")
+st.title("🛡️ SOC Threat Inteligence Dashboard")
+st.markdown("Automation gathering threat Inteligence and report @wildaaan.")
 
-# --- AMBIL DATA DARI STREAMLIT SECRETS ---
-# st.secrets.get() akan mengambil key jika ada, atau mengosongkan ("") jika belum diatur
-ENV_GEMINI = st.secrets.get("GEMINI_API_KEY", "")
-ENV_VT = st.secrets.get("VT_API_KEY", "")
-ENV_ABUSE = st.secrets.get("ABUSEIPDB_API_KEY", "")
-ENV_URLSCAN = st.secrets.get("URLSCAN_API_KEY", "")
-ENV_HYBRID = st.secrets.get("HYBRID_API_KEY", "")
+# --- AMBIL DATA DARI STREAMLIT SECRETS (Dengan Penanganan Error Lanjutan) ---
+ENV_GEMINI = ""
+ENV_VT = ""
+ENV_ABUSE = ""
+ENV_URLSCAN = ""
+ENV_HYBRID = ""
+
+try:
+    ENV_GEMINI = st.secrets.get("GEMINI_API_KEY", "")
+    ENV_VT = st.secrets.get("VT_API_KEY", "")
+    ENV_ABUSE = st.secrets.get("ABUSEIPDB_API_KEY", "")
+    ENV_URLSCAN = st.secrets.get("URLSCAN_API_KEY", "")
+    ENV_HYBRID = st.secrets.get("HYBRID_API_KEY", "")
+except:
+    pass # Jika secrets.toml tidak ada di lokal, biarkan kosong
 
 # --- SIDEBAR KONFIGURASI API ---
 st.sidebar.header("🔑 Konfigurasi API")
@@ -213,98 +230,150 @@ st.sidebar.markdown("---")
 urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password", value=ENV_URLSCAN)
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
-# Form Input Utama
-with st.form("ioc_form"):
-    col1, col2 = st.columns(2)
-    with col1:
-        alert_name = st.text_input("Alert Name (Wajib):", placeholder="e.g., FGT utm:webfilter blocked")
-        ioc = st.text_input("Primary IoC (Wajib):", placeholder="IP, Domain, MD5, SHA1, atau SHA256")
-        final_verdict_decision = st.selectbox("Status Alert (Untuk instruksi AI):", ["True Positive", "False Positive", "Likely Benign"])
-    with col2:
-        action = st.text_input("Action Taken (Opsional):", placeholder="e.g., Blocked")
-        abuse_ip = st.text_input("Related IP untuk AbuseIPDB (Opsional):", placeholder="Masukkan IP jika IoC utama adalah Domain/Hash")
-    
-    submit_button = st.form_submit_button("Mulai Analisis & Generate Laporan")
+# --- MEMBAGI UI MENJADI 2 TAB ---
+tab1, tab2 = st.tabs(["🔍 New Analysis", "🕒 History"])
 
-# Proses Logika
-if submit_button:
-    if not alert_name or not ioc:
-        st.error("⚠️ Alert Name dan Primary IoC wajib diisi!")
-    elif not vt_key or not abuse_key or not gemini_key:
-        st.error("⚠️ Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
-    else:
-        ioc = ioc.strip()
-        ioc_type = get_ioc_type(ioc)
+# ==========================================
+# TAB 1: NEW ANALYSIS
+# ==========================================
+with tab1:
+    with st.form("ioc_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            alert_name = st.text_input("Alert Name:", placeholder="e.g., FGT utm:webfilter blocked")
+            ioc = st.text_input("Primary IoC:", placeholder="IP, Domain, MD5, SHA1, atau SHA256")
+            final_verdict_decision = st.selectbox("Status Alert (Untuk instruksi AI):", ["True Positive", "False Positive", "Likely Benign"])
+        with col2:
+            action = st.text_input("Action Taken (Opsional):", placeholder="e.g., Blocked")
+            abuse_ip = st.text_input("Related IP untuk AbuseIPDB (Opsional):", placeholder="Masukkan IP jika IoC utama adalah Domain/Hash")
         
-        if ioc_type == "unknown":
-            st.error(f"⚠️ Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar.")
+        submit_button = st.form_submit_button("Mulai Analisis & Generate Laporan")
+
+    if submit_button:
+        if not alert_name or not ioc:
+            st.error("⚠️ Alert Name dan Primary IoC wajib diisi!")
+        elif not vt_key or not abuse_key or not gemini_key:
+            st.error("⚠️ Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
         else:
-            with st.spinner(f"1/2: Mengambil data intel untuk {ioc_type.upper()} {defang_ioc(ioc, ioc_type)}..."):
-                target_ip_for_abuse = ioc if ioc_type == 'ip' else abuse_ip.strip()
+            ioc = ioc.strip()
+            ioc_type = get_ioc_type(ioc)
+            
+            if ioc_type == "unknown":
+                st.error(f"⚠️ Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar.")
+            else:
+                with st.spinner(f"1/2: Mengambil data intel untuk {ioc_type.upper()} {defang_ioc(ioc, ioc_type)}..."):
+                    target_ip_for_abuse = ioc if ioc_type == 'ip' else abuse_ip.strip()
 
-                vt_results = query_virustotal(ioc, ioc_type, vt_key)
-                vt_rel_results = query_virustotal_relationships(ioc, ioc_type, vt_key)
-                abuse_results = query_abuseipdb(target_ip_for_abuse, abuse_key) if target_ip_for_abuse else ""
-                urlscan_results = query_urlscan(ioc, ioc_type, urlscan_key) if ioc_type in ['domain', 'ip'] else ""
-                hybrid_results = query_hybridanalysis(ioc, ioc_type, hybrid_key) if ioc_type in ["md5", "sha1", "sha256"] else ""
-                tip_results = query_tip_neiki(ioc, ioc_type) if ioc_type in ["md5", "sha1", "sha256"] else ""
-                
-                first_seen, last_seen = "N/A", "N/A"
-                try:
-                    vt_dict = json.loads(vt_results)
-                    if vt_dict.get('last_analysis_date'): 
-                        last_seen = datetime.fromtimestamp(vt_dict['last_analysis_date']).strftime('%Y-%m-%d %H:%M:%S UTC')
-                except: pass
-
-                verdict = generate_initial_verdict(ioc_type, vt_results, abuse_results)
-                
-                collated = f"VirusTotal Data:\n{vt_results}\n"
-                if vt_rel_results: collated += f"\nVirusTotal Relationships:\n{json.dumps(vt_rel_results, indent=2)}\n"
-                if abuse_results: collated += f"\nAbuseIPDB Data:\n{abuse_results}\n"
-                if urlscan_results: collated += f"\nURLScan Data:\n{urlscan_results}\n"
-                if hybrid_results: collated += f"\nHybridAnalysis Data:\n{hybrid_results}\n"
-                if tip_results: collated += f"\nTIP Neiki Data:\n{tip_results}\n"
-
-                final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, final_verdict_decision)
-
-            with st.spinner("2/2: Menghasilkan Laporan Akhir dengan Gemini AI..."):
-                try:
-                    # JURUS BYPASS SSL TINGKAT LANJUT (Mengakali Bug SDK Google)
-                    import ssl
-                    custom_ssl_context = ssl.create_default_context()
-                    custom_ssl_context.check_hostname = False
-                    custom_ssl_context.verify_mode = ssl.CERT_NONE
+                    vt_results = query_virustotal(ioc, ioc_type, vt_key)
+                    vt_rel_results = query_virustotal_relationships(ioc, ioc_type, vt_key)
+                    abuse_results = query_abuseipdb(target_ip_for_abuse, abuse_key) if target_ip_for_abuse else ""
+                    urlscan_results = query_urlscan(ioc, ioc_type, urlscan_key) if ioc_type in ['domain', 'ip'] else ""
+                    hybrid_results = query_hybridanalysis(ioc, ioc_type, hybrid_key) if ioc_type in ["md5", "sha1", "sha256"] else ""
+                    tip_results = query_tip_neiki(ioc, ioc_type) if ioc_type in ["md5", "sha1", "sha256"] else ""
                     
-                    client = genai.Client(
-                        api_key=gemini_key,
-                        http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
-                    )
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=final_prompt,
-                    )
-                    final_report_text = response.text
-                except Exception as e:
-                    final_report_text = f"Terjadi kesalahan saat menghubungi API Gemini: {str(e)}"
+                    first_seen, last_seen = "N/A", "N/A"
+                    try:
+                        vt_dict = json.loads(vt_results)
+                        if vt_dict.get('last_analysis_date'): 
+                            last_seen = datetime.fromtimestamp(vt_dict['last_analysis_date']).strftime('%Y-%m-%d %H:%M:%S UTC')
+                    except: pass
 
-            st.success(f"Analisis Selesai!")
+                    verdict = generate_initial_verdict(ioc_type, vt_results, abuse_results)
+                    
+                    collated = f"VirusTotal Data:\n{vt_results}\n"
+                    if vt_rel_results: collated += f"\nVirusTotal Relationships:\n{json.dumps(vt_rel_results, indent=2)}\n"
+                    if abuse_results: collated += f"\nAbuseIPDB Data:\n{abuse_results}\n"
+                    if urlscan_results: collated += f"\nURLScan Data:\n{urlscan_results}\n"
+                    if hybrid_results: collated += f"\nHybridAnalysis Data:\n{hybrid_results}\n"
+                    if tip_results: collated += f"\nTIP Neiki Data:\n{tip_results}\n"
+
+                    final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, final_verdict_decision)
+
+                with st.spinner("2/2: Menghasilkan Laporan Akhir dengan Gemini AI..."):
+                    try:
+                        # JURUS BYPASS SSL TINGKAT LANJUT
+                        import ssl
+                        custom_ssl_context = ssl.create_default_context()
+                        custom_ssl_context.check_hostname = False
+                        custom_ssl_context.verify_mode = ssl.CERT_NONE
+                        
+                        client = genai.Client(
+                            api_key=gemini_key,
+                            http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
+                        )
+                        response = client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=final_prompt,
+                        )
+                        final_report_text = response.text
+                    except Exception as e:
+                        final_report_text = f"Terjadi kesalahan saat menghubungi API Gemini: {str(e)}"
+
+                st.success(f"Analisis Selesai!")
+                
+                # --- SIMPAN KE HISTORY ---
+                # Menggunakan .insert(0, ...) agar riwayat terbaru selalu muncul paling atas
+                st.session_state.history.insert(0, {
+                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "ioc": ioc,
+                    "alert_name": alert_name,
+                    "status": final_verdict_decision,
+                    "report": final_report_text,
+                    "raw_prompt": final_prompt
+                })
+
+                # Menampilkan Laporan Akhir
+                st.subheader("📝 Final Report :")
+                st.text_area("Copy atau edit teks di bawah ini:", value=final_report_text, height=400)
+                
+                # --- Tombol Download Prompt Mentah (Fallback) ---
+                filename = f"prompt_{ioc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                st.download_button(
+                    label=f"⬇️ Download Exported File: {filename}",
+                    data=final_prompt,
+                    file_name=filename,
+                    mime="text/plain"
+                )
+                st.markdown("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website")
+                st.markdown("<br>", unsafe_allow_html=True)
             
-            # Menampilkan Laporan Akhir
-            st.subheader("📝 Final Report :")
-            st.text_area("Copy atau edit teks di bawah ini:", value=final_report_text, height=400)
+                # Tampilkan Data Mentah
+                with st.expander("See Raw JSON Data"):
+                    st.code(collated, language='json')
+
+
+# ==========================================
+# TAB 2: HISTORY (RIWAYAT ANALISIS)
+# ==========================================
+with tab2:
+    st.subheader("🕒 Riwayat Analisis")
+    st.markdown("Data riwayat di bawah ini disimpan sementara dan akan hilang jika Anda refresh halaman.")
+    
+    if len(st.session_state.history) == 0:
+        st.info("Belum ada riwayat analisis.")
+    else:
+        # Tombol untuk menghapus riwayat
+        if st.button("🗑️ Hapus Semua Riwayat"):
+            st.session_state.history = []
+            st.rerun() # Refresh halaman agar riwayat bersih
             
-            # --- TAMBAHAN: Tombol Download Prompt Mentah (Fallback) ---
-            filename = f"prompt_{ioc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            st.download_button(
-                label=f"⬇️ Download Exported File: {filename}",
-                data=final_prompt, # Mengambil prompt mentah, BUKAN hasil dari Gemini
-                file_name=filename,
-                mime="text/plain"
-            )
-            st.markdown("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling website")
-            st.markdown("<br>", unsafe_allow_html=True) # Memberi sedikit jarak
-		
-            
-            # Tampilkan Data Mentah
-            with st.expander("See Raw JSON Data"):
-                st.code(collated, language='json')
+        st.markdown("---")
+        
+        # Menampilkan setiap riwayat dalam bentuk expander (bisa di-klik untuk buka/tutup)
+        for item in st.session_state.history:
+            with st.expander(f"[{item['timestamp']}] {item['ioc']} - {item['status']}"):
+                st.write(f"**Alert Name:** {item['alert_name']}")
+                st.text_area(
+                    "Final Report", 
+                    value=item['report'], 
+                    height=250, 
+                    key=f"report_{item['timestamp']}" # Menggunakan waktu sebagai key unik
+                )
+                
+                st.download_button(
+                    label="⬇️ Download Prompt Text",
+                    data=item['raw_prompt'],
+                    file_name=f"history_prompt_{item['ioc'].replace('.', '_')}.txt",
+                    mime="text/plain",
+                    key=f"dl_{item['timestamp']}" # Menggunakan waktu sebagai key unik
+                )
