@@ -230,8 +230,8 @@ st.sidebar.markdown("---")
 urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password", value=ENV_URLSCAN)
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
-# --- MEMBAGI UI MENJADI 2 TAB ---
-tab1, tab2 = st.tabs(["🔍 New Analysis", "🕒 History"])
+# --- MEMBAGI UI MENJADI 3 TAB ---
+tab1, tab2, tab3 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Automation [.]"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -377,3 +377,29 @@ with tab2:
                     mime="text/plain",
                     key=f"dl_{item['timestamp']}" # Menggunakan waktu sebagai key unik
                 )
+
+# ==========================================
+# TAB 3: AUTOMATION (DEFANG IoC)
+# ==========================================
+with tab3:
+    st.subheader("⚙️ Defang IoC (Python Automation)")
+    
+    raw_ioc_input = st.text_area(
+        "Masukkan IoC (Bisa copy-paste banyak baris sekaligus):", 
+        placeholder="google.com\nwildan.vercel.app\n192.168.1.1\nhttps://evil.com/payload",
+        height=200
+    )
+    
+    if st.button("Defang >"):
+        if raw_ioc_input.strip():
+            # PROSES AUTOMATION PYTHON MURNI
+            # 1. Ganti titik menjadi [.]
+            defanged_output = raw_ioc_input.replace(".", "[.]")
+            
+            # 2. BONUS SOC PRO-TIP: Ganti http/https menjadi hxxp/hxxps
+            defanged_output = defanged_output.replace("http://", "hxxp://").replace("https://", "hxxps://")
+            
+            st.success("Berhasil!")
+            st.text_area("📋 Hasil:", value=defanged_output, height=200)
+        else:
+            st.warning("⚠️ Masukkan teks IoC terlebih dahulu di kotak atas.")
