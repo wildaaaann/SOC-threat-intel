@@ -382,69 +382,65 @@ with tab2:
 # TAB 3: AUTOMATION (EXTRACT & DEFANG IoC)
 # ==========================================
 with tab3:
-    st.subheader("⚙️ IoC Extractor & Defang Automation")
-    st.markdown("Ekstrak semua IP, URL, dan Domain secara otomatis dari teks mentah yang berantakan, buang duplikat, dan *defang* dengan bersih.")
+    st.subheader("⚙️ Clean IoC Extractor & Defang")
+    st.markdown("Ekstrak IP, URL, dan Domain secara otomatis. Protokol (http/https), 'www.', backslash, dan duplikat akan dibersihkan murni.")
     
     raw_ioc_input = st.text_area(
         "Masukkan Teks Mentah (Raw Logs / SIEM Dump):", 
-        placeholder="Contoh:\nDns: data-e5.brmtr.org\nUrl: https://data-e5.brmtr.org/\nIp: 10.20.1.47\n...",
+        placeholder="Contoh:\nDns: data-e5.brmtr.org\nUrl: https://www.ikan.info/\nIp: 10.20.1.47\n...",
         height=300
     )
     
     def extract_and_defang_mixed_iocs(text):
-        # Hapus label metadata yang mengganggu agar regex lebih bersih
-        cleanup_labels = ['System:', 'Ip:', 'Dns:', 'Url:', 'Domain:', '\"', ',']
+        # 1. Buang label metadata log agar tidak ikut terdeteksi
+        cleanup_labels = ['System:', 'Ip:', 'Dns:', 'Url:', 'Domain:']
         clean_text = text
         for label in cleanup_labels:
-            # Gunakan regex case-insensitive untuk menghapus label
             clean_text = re.sub(f'(?i){label}', ' ', clean_text)
             
-        # Pisahkan menjadi token/kata untuk dianalisis
-        tokens = clean_text.split()
+        # 2. Pisahkan teks berdasarkan spasi, koma, tanda kutip ("), atau backslash (\)
+        # Ini akan otomatis membuang backslash (\) dan memisahkan array URL yang tergabung
+        tokens = re.split(r'[\s,\"\'\\]+', clean_text)
         
-        unique_iocs = set()
+        unique_iocs = set() # Menggunakan Set otomatis mencegah duplikat
         
-        # Pola Regex
+        # Pola deteksi IP dan Domain/URL dasar
         ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
-        url_pattern = re.compile(r'^(http|https)://[^\s]+', re.IGNORECASE)
-        # Pola sederhana untuk domain: ada titik, tidak ada garis miring, panjang > 3
-        domain_pattern = re.compile(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        domain_url_pattern = re.compile(r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
         
         for token in tokens:
             token = token.strip()
+            if not token:
+                continue
             
-            # Ekstrak URL
-            if url_pattern.match(token):
-                # Defang URL
-                defanged_url = token.replace("http://", "hxxp://").replace("https://", "hxxps://").replace(".", "[.]")
-                unique_iocs.add(defanged_url)
+            # 3. Filter/Bersihkan protokol dan www
+            token = re.sub(r'^https?://', '', token, flags=re.IGNORECASE) # Buang http:// atau https://
+            token = re.sub(r'^www\.', '', token, flags=re.IGNORECASE)     # Buang www.
+            token = token.strip('/')                                      # Buang slash (/) nyasar di awal/akhir
+            
+            if not token:
                 continue
                 
-            # Ekstrak IP
-            if ip_pattern.match(token):
-                defanged_ip = token.replace(".", "[.]")
-                unique_iocs.add(defanged_ip)
-                continue
-                
-            # Ekstrak Domain (Jika bukan IP dan bukan URL, tapi cocok dengan pola domain)
-            if domain_pattern.match(token) and not ip_pattern.match(token):
-                defanged_domain = token.replace(".", "[.]")
-                unique_iocs.add(defanged_domain)
+            # 4. Validasi & Defang
+            # Jika itu adalah IP atau mengandung format Domain
+            if ip_pattern.match(token) or domain_url_pattern.search(token):
+                defanged_ioc = token.replace(".", "[.]")
+                unique_iocs.add(defanged_ioc)
 
-        # Urutkan berdasarkan abjad agar rapi
+        # 5. Urutkan abjad & gabungkan dengan enter murni (tanpa gap)
         sorted_iocs = sorted(list(unique_iocs))
-        
-        # Gabungkan dengan enter tunggal
         return "\n".join(sorted_iocs)
 
-    if st.button("Extract & Defang", type="primary"):
+    if st.button("Extract & Clean Defang", type="primary"):
         if raw_ioc_input.strip():
-            with st.spinner("Memproses data mentah..."):
+            with st.spinner("Memproses dan membersihkan data..."):
                 defanged_output = extract_and_defang_mixed_iocs(raw_ioc_input)
                 
                 if defanged_output:
-                    st.success("Berhasil! Menemukan dan membersihkan indikator unik.")
-                    st.text_area("📋 Hasil Bersih (Siap Copy-Paste):", value=defanged_output, height=300)
+                    # Menghitung jumlah IoC menggunakan line count
+                    ioc_count = len(defanged_output.split('\n'))
+                    st.success(f"Berhasil! Menemukan {ioc_count} indikator unik yang bersih.")
+                    st.text_area("📋 Hasil Bersih (Siap Copy-Paste):", value=defanged_output, height=350)
                 else:
                     st.warning("⚠️ Tidak ditemukan IP, URL, atau Domain yang valid pada teks yang diberikan.")
         else:
