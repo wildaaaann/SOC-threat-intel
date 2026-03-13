@@ -379,31 +379,76 @@ with tab2:
                 )
 
 # ==========================================
-# TAB 3: AUTOMATION (DEFANG IoC)
+# TAB 3: AUTOMATION (EXTRACT & DEFANG IoC)
 # ==========================================
 with tab3:
-    st.subheader("⚙️ Defang IoC (Python Automation)")
+    st.subheader("⚙️ IoC Extractor & Defang Automation")
+    st.markdown("Ekstrak semua IP, URL, dan Domain secara otomatis dari teks mentah yang berantakan, buang duplikat, dan *defang* dengan bersih.")
     
     raw_ioc_input = st.text_area(
-        "Masukkan IoC (Bisa copy-paste banyak baris sekaligus):", 
-        placeholder="google.com\nwildan.vercel.app\n192.168.1.1\nhttps://evil.com/payload",
-        height=200
+        "Masukkan Teks Mentah (Raw Logs / SIEM Dump):", 
+        placeholder="Contoh:\nDns: data-e5.brmtr.org\nUrl: https://data-e5.brmtr.org/\nIp: 10.20.1.47\n...",
+        height=300
     )
     
-    if st.button("Defang >"):
+    def extract_and_defang_mixed_iocs(text):
+        # Hapus label metadata yang mengganggu agar regex lebih bersih
+        cleanup_labels = ['System:', 'Ip:', 'Dns:', 'Url:', 'Domain:', '\"', ',']
+        clean_text = text
+        for label in cleanup_labels:
+            # Gunakan regex case-insensitive untuk menghapus label
+            clean_text = re.sub(f'(?i){label}', ' ', clean_text)
+            
+        # Pisahkan menjadi token/kata untuk dianalisis
+        tokens = clean_text.split()
+        
+        unique_iocs = set()
+        
+        # Pola Regex
+        ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+        url_pattern = re.compile(r'^(http|https)://[^\s]+', re.IGNORECASE)
+        # Pola sederhana untuk domain: ada titik, tidak ada garis miring, panjang > 3
+        domain_pattern = re.compile(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        
+        for token in tokens:
+            token = token.strip()
+            
+            # Ekstrak URL
+            if url_pattern.match(token):
+                # Defang URL
+                defanged_url = token.replace("http://", "hxxp://").replace("https://", "hxxps://").replace(".", "[.]")
+                unique_iocs.add(defanged_url)
+                continue
+                
+            # Ekstrak IP
+            if ip_pattern.match(token):
+                defanged_ip = token.replace(".", "[.]")
+                unique_iocs.add(defanged_ip)
+                continue
+                
+            # Ekstrak Domain (Jika bukan IP dan bukan URL, tapi cocok dengan pola domain)
+            if domain_pattern.match(token) and not ip_pattern.match(token):
+                defanged_domain = token.replace(".", "[.]")
+                unique_iocs.add(defanged_domain)
+
+        # Urutkan berdasarkan abjad agar rapi
+        sorted_iocs = sorted(list(unique_iocs))
+        
+        # Gabungkan dengan enter tunggal
+        return "\n".join(sorted_iocs)
+
+    if st.button("Extract & Defang", type="primary"):
         if raw_ioc_input.strip():
-            # PROSES AUTOMATION PYTHON MURNI
-            # 1. Ganti titik menjadi [.]
-            defanged_output = raw_ioc_input.replace(".", "[.]")
-            
-            # 2. BONUS SOC PRO-TIP: Ganti http/https menjadi hxxp/hxxps
-            defanged_output = defanged_output.replace("http://", "hxxp://").replace("https://", "hxxps://")
-            
-            st.success("Berhasil!")
-            st.text_area("📋 Hasil:", value=defanged_output, height=200)
+            with st.spinner("Memproses data mentah..."):
+                defanged_output = extract_and_defang_mixed_iocs(raw_ioc_input)
+                
+                if defanged_output:
+                    st.success("Berhasil! Menemukan dan membersihkan indikator unik.")
+                    st.text_area("📋 Hasil Bersih (Siap Copy-Paste):", value=defanged_output, height=300)
+                else:
+                    st.warning("⚠️ Tidak ditemukan IP, URL, atau Domain yang valid pada teks yang diberikan.")
         else:
-            st.warning("⚠️ Masukkan teks IoC terlebih dahulu di kotak atas.")
-            
+            st.error("⚠️ Masukkan teks mentah terlebih dahulu di kotak atas.")
 
 # ==========================================
 # TAB 4: BULK LOG PARSER & FORMATTER
