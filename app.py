@@ -231,7 +231,7 @@ urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
-tab1, tab2, tab3 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Automation [.]"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Single Defang", "📝 Bulk Parser"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -403,3 +403,110 @@ with tab3:
             st.text_area("📋 Hasil:", value=defanged_output, height=200)
         else:
             st.warning("⚠️ Masukkan teks IoC terlebih dahulu di kotak atas.")
+
+
+# ==========================================
+# TAB 4: BULK LOG PARSER & FORMATTER
+# ==========================================
+with tab4:
+    st.subheader("📝 Bulk Log Parser & Plaintext Formatter")
+    st.markdown("Ekstrak IP dari log mentah SOC, defang otomatis, dan format menjadi plaintext siap tempel.")
+    
+    raw_log_input = st.text_area(
+        "Masukkan Raw Log / Data Mentah (Copy-Paste dari SIEM):", 
+        height=300
+    )
+    
+    def parse_and_format_logs(raw_text):
+        lines = raw_text.strip().split('\n')
+        results = []
+        current_alert = "Unknown Alert"
+        current_ips = set()
+        
+        # Regex untuk mendeteksi IPv4 yang valid
+        ip_pattern = re.compile(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Ekstrak IP jika ada di baris ini
+            found_ips = ip_pattern.findall(line)
+            
+            if found_ips:
+                for ip in found_ips:
+                    current_ips.add(ip)
+            else:
+                # Jika tidak ada IP, cek apakah ini baris angka (jumlah alert) -> abaikan
+                if line.isdigit():
+                    continue
+                
+                # Abaikan baris metadata (URL, Hash, System, Account) yang bukan nama alert
+                lower_line = line.lower()
+                if any(lower_line.startswith(p) for p in ['url:', 'filehash:', 'system:', 'account:', 'host:', 'file:']):
+                    continue
+                    
+                # Jika lolos semua filter di atas, asumsikan ini adalah 'Alert Name'
+                # Simpan alert yang sedang diproses (jika sudah ada isinya) sebelum pindah ke alert baru
+                if current_ips:
+                    results.append({
+                        "alert_name": current_alert,
+                        "ips": list(current_ips)
+                    })
+                    current_ips = set() # Reset untuk alert baru
+                
+                current_alert = line
+                
+        # Simpan blok alert terakhir
+        if current_ips:
+            results.append({
+                "alert_name": current_alert,
+                "ips": list(current_ips)
+            })
+            
+        return results
+
+    if st.button("Parse & Generate Plaintext", type="primary"):
+        if raw_log_input.strip():
+            with st.spinner("Mengekstrak data dan merapikan format..."):
+                parsed_data = parse_and_format_logs(raw_log_input)
+                
+                if not parsed_data:
+                    st.warning("⚠️ Tidak ada IP yang berhasil diekstrak.")
+                else:
+                    output_text = ""
+                    for item in parsed_data:
+                        # Proses Defang IP (titik jadi kurung siku)
+                        defanged_ips = [ip.replace(".", "[.]") for ip in item['ips']]
+                        
+                        # Susun plaintext
+                        output_text += f"Alert Name: {item['alert_name']}\n"
+                        output_text += "Justification: \n" # Dikosongkan sesuai permintaan
+                        output_text += "Indicators:\n"
+                        
+                        # Gabungkan IP dengan koma dan pindah baris
+                        output_text += ",\n".join(defanged_ips) + "\n\n"
+                        
+                        # Pemisah antar alert
+                        output_text += "=========================================\n\n"
+                    
+                    # Bersihkan enter dan sama dengan berlebih di ujung text
+                    output_text = output_text.strip().rstrip("=").strip()
+
+                    st.success(f"Berhasil mengekstrak {len(parsed_data)} Alert!")
+                    st.text_area(
+                        "📋 Plaintext Output (Siap Copy-Paste tanpa gap 2 enter):", 
+                        value=output_text, 
+                        height=500
+                    )
+                    
+                    # Fitur Download File TXT
+                    st.download_button(
+                        label="⬇️ Download sebagai .txt",
+                        data=output_text,
+                        file_name=f"Parsed_Indicators_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+        else:
+            st.error("⚠️ Masukkan teks log mentah terlebih dahulu di kotak atas.")
