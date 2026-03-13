@@ -403,7 +403,7 @@ with tab3:
             st.text_area("📋 Hasil:", value=defanged_output, height=200)
         else:
             st.warning("⚠️ Masukkan teks IoC terlebih dahulu di kotak atas.")
-
+            
 
 # ==========================================
 # TAB 4: BULK LOG PARSER & FORMATTER
