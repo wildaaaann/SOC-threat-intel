@@ -231,7 +231,7 @@ urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Single Defang", "📝 Bulk Parser"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -383,11 +383,11 @@ with tab2:
 # ==========================================
 with tab3:
     st.subheader("⚙️ Clean IoC Extractor & Defang")
-    st.markdown("Ekstrak IP, URL, dan Domain secara otomatis. Protokol (http/https), 'www.', backslash, dan duplikat akan dibersihkan murni.")
+    st.markdown("Ekstrak IP, URL, dan Domain otomatis.")
     
     raw_ioc_input = st.text_area(
-        "Masukkan Teks Mentah (Raw Logs / SIEM Dump):", 
-        placeholder="Contoh:\nDns: data-e5.brmtr.org\nUrl: https://www.ikan.info/\nIp: 10.20.1.47\n...",
+        "Insert (Raw Logs / SIEM Dump):", 
+        placeholder="Contoh:\nDns: wildan.vercel.app\nUrl: https://www.google.com/\nIp: 192.168.1.1\n...",
         height=300
     )
     
@@ -440,7 +440,7 @@ with tab3:
                     # Menghitung jumlah IoC menggunakan line count
                     ioc_count = len(defanged_output.split('\n'))
                     st.success(f"Berhasil! Menemukan {ioc_count} indikator unik yang bersih.")
-                    st.text_area("📋 Hasil Bersih (Siap Copy-Paste):", value=defanged_output, height=350)
+                    st.text_area("📋 Hasil :", value=defanged_output, height=350)
                 else:
                     st.warning("⚠️ Tidak ditemukan IP, URL, atau Domain yang valid pada teks yang diberikan.")
         else:
@@ -451,10 +451,10 @@ with tab3:
 # ==========================================
 with tab4:
     st.subheader("📝 Bulk Log Parser & Plaintext Formatter")
-    st.markdown("Ekstrak IP dari log mentah SOC, defang otomatis, dan format menjadi plaintext siap tempel.")
+    st.markdown("Ekstrak IP dari log mentah SOC, defang otomatis, dan format plaintext.")
     
     raw_log_input = st.text_area(
-        "Masukkan Raw Log / Data Mentah (Copy-Paste dari SIEM):", 
+        "Masukkan Raw Log / Data Mentah (dari SIEM):", 
         height=300
     )
     
@@ -537,7 +537,7 @@ with tab4:
 
                     st.success(f"Berhasil mengekstrak {len(parsed_data)} Alert!")
                     st.text_area(
-                        "📋 Plaintext Output (Siap Copy-Paste tanpa gap 2 enter):", 
+                        "📋 Plaintext Output:", 
                         value=output_text, 
                         height=500
                     )
