@@ -231,7 +231,7 @@ urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser", "📄 Converter"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -551,3 +551,86 @@ with tab4:
                     )
         else:
             st.error("⚠️ Masukkan teks log mentah terlebih dahulu di kotak atas.")
+
+
+# ==========================================
+# TAB 5: FILE CONVERTER (PDF <-> WORD)
+# ==========================================
+with tab5:
+    st.subheader("📄 Local Document Converter")
+    st.markdown("Konversi file secara aman (Offline/Lokal) tanpa perlu mengunggah ke situs web pihak ketiga.")
+    
+    # Memilih mode konversi
+    convert_mode = st.radio("Pilih Mode Konversi:", ["PDF ke Word", "Word ke PDF"])
+    
+    if convert_mode == "PDF ke Word":
+        uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"])
+        
+        if uploaded_pdf is not None:
+            if st.button("🔄 Konversi ke Word"):
+                with st.spinner("Sedang memproses konversi..."):
+                    import tempfile
+                    import os
+                    from pdf2docx import Converter
+                    
+                    # 1. Simpan file yang diupload ke ruang sementara (RAM/Temp)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                        tmp_pdf.write(uploaded_pdf.getvalue())
+                        tmp_pdf_path = tmp_pdf.name
+                        
+                    output_docx = tmp_pdf_path.replace(".pdf", ".docx")
+                    
+                    try:
+                        # 2. Proses Konversi
+                        cv = Converter(tmp_pdf_path)
+                        cv.convert(output_docx)
+                        cv.close()
+                        
+                        # 3. Siapkan tombol download
+                        with open(output_docx, "rb") as file:
+                            st.download_button(
+                                label="⬇️ Download Hasil Word (.docx)",
+                                data=file,
+                                file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                        st.success("✅ Konversi PDF ke Word Berhasil!")
+                    except Exception as e:
+                        st.error(f"❌ Terjadi kesalahan: {e}")
+                    finally:
+                        # 4. Hapus file sementara demi keamanan OPSEC
+                        if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
+                        if os.path.exists(output_docx): os.unlink(output_docx)
+
+    elif convert_mode == "Word ke PDF":
+        st.info("💡 Catatan: Fitur ini berjalan sempurna di Localhost (Mac/Windows) yang memiliki MS Word. Jika di-deploy ke Cloud (Hugging Face), fitur ini mungkin tidak akan berfungsi.")
+        uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"])
+        
+        if uploaded_docx is not None:
+            if st.button("🔄 Konversi ke PDF"):
+                with st.spinner("Sedang merender PDF..."):
+                    import tempfile
+                    import os
+                    from docx2pdf import convert
+                    
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_docx:
+                        tmp_docx.write(uploaded_docx.getvalue())
+                        tmp_docx_path = tmp_docx.name
+                        
+                    output_pdf = tmp_docx_path.replace(".docx", ".pdf")
+                    
+                    try:
+                        convert(tmp_docx_path, output_pdf)
+                        with open(output_pdf, "rb") as file:
+                            st.download_button(
+                                label="⬇️ Download Hasil PDF (.pdf)",
+                                data=file,
+                                file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
+                                mime="application/pdf"
+                            )
+                        st.success("✅ Konversi Word ke PDF Berhasil!")
+                    except Exception as e:
+                        st.error(f"❌ Gagal: Pastikan Microsoft Word terinstal di mesin ini. (Error: {e})")
+                    finally:
+                        if os.path.exists(tmp_docx_path): os.unlink(tmp_docx_path)
+                        if os.path.exists(output_pdf): os.unlink(output_pdf)
