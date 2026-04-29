@@ -673,26 +673,35 @@ with tab6:
                 action = "N/A"
                 workspace = "N/A"
                 
-                # 1. Ekstrak Incident ID (dengan logika pemisah kode tiket)
+                # 1. Ekstrak Incident ID (Super Fallback)
                 if len(parts) > 0:
                     raw_first_part = parts[0].strip()
-                    match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
                     
-                    if match:
-                        temp_id = match.group(1)
-                    else:
-                        fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
-                        temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
-                    
-                    # --- FITUR BARU: HANYA AMBIL ANGKA SETELAH STRIP (-) ---
-                    if '-' in temp_id:
-                        incident_id = temp_id.split('-')[-1].strip()
-                    else:
-                        incident_id = temp_id
+                    # Skenario A: Teks menempel (D25SEPS-307726SOCNCI)
+                    match_glued = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
+                    if match_glued and '-' in match_glued.group(1):
+                        incident_id = match_glued.group(1).split('-')[-1].strip()
                         
-                # 2. Ekstrak Alert Name
+                    # Skenario B: Ada spasi (D25SEPS-3077 26SOCNCI)
+                    elif '-' in raw_first_part and ' ' in raw_first_part:
+                        temp_id = raw_first_part.split()[0]
+                        incident_id = temp_id.split('-')[-1].strip() if '-' in temp_id else temp_id
+                        
+                    # Skenario C: Terpisah di baris atasnya (Copy-paste tabel baru)
+                    elif not '-' in raw_first_part:
+                        # Jika tidak ada strip, berarti ID aslinya tertinggal di baris sebelumnya
+                        if i > 0 and '-' in lines[i-1]:
+                            incident_id = lines[i-1].split('-')[-1].strip()
+                        else:
+                            incident_id = raw_first_part
+                            
+                    # Skenario D: Normal (D25SEPS-3077)
+                    elif '-' in raw_first_part:
+                        incident_id = raw_first_part.split('-')[-1].strip()
+
+                # 2. Ekstrak Alert Name (Ditambah pembersih backslash '\')
                 if len(parts) >= 3:
-                    alert_name = re.sub(r'\[|\]|"', '', parts[2]).strip()
+                    alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
                     
                 # 3. Ekstrak Action & Workspace dari sisa teks (Tail)
                 if len(parts) >= 4:
@@ -701,11 +710,11 @@ with tab6:
                     
                     if action_match:
                         action_raw = action_match.group(1)
-                        action = re.sub(r'\[|\]|"', '', action_raw).strip()
+                        action = re.sub(r'[\[\]\"\\]', '', action_raw).strip()
                         if action_match.group(2):
                             workspace = action_match.group(2).strip()
                     else:
-                        action = re.sub(r'\[|\]|"', '', parts[3]).strip()
+                        action = re.sub(r'[\[\]\"\\]', '', parts[3]).strip()
                         
                 # 4. Fallback Workspace
                 if workspace == "N/A" and i + 1 < len(lines):
