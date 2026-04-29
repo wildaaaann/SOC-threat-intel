@@ -231,7 +231,7 @@ urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser", "📄 Converter"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser", "📄 Converter", "📋 Shift Summarizer"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -558,17 +558,16 @@ with tab4:
 # ==========================================
 with tab5:
     st.subheader("📄 Cloud Document Converter")
-    st.markdown("Konversi file secara aman di server. Fitur ini didesain untuk bekerja di Streamlit Cloud/Hosting Linux.")
     
     # Memilih mode konversi
-    convert_mode = st.radio("Pilih Mode Konversi:", ["PDF ke Word", "Word ke PDF"], key="converter_radio")
+    convert_mode = st.radio("Type:", ["PDF to Word", "Word to PDF"], key="converter_radio")
     
-    if convert_mode == "PDF ke Word":
+    if convert_mode == "PDF to Word":
         uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"], key="pdf_uploader")
         
         if uploaded_pdf is not None:
             if st.button("🔄 Konversi ke Word", key="btn_pdf_to_word"):
-                with st.spinner("Sedang memproses konversi..."):
+                with st.spinner("memproses konversi..."):
                     import tempfile
                     import os
                     from pdf2docx import Converter
@@ -587,19 +586,19 @@ with tab5:
                         
                         with open(output_docx, "rb") as file:
                             st.download_button(
-                                label="⬇️ Download Hasil Word (.docx)",
+                                label="⬇️ Download Word (.docx)",
                                 data=file,
                                 file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             )
-                        st.success("✅ Konversi Berhasil!")
+                        st.success("Done!")
                     except Exception as e:
                         st.error(f"❌ Terjadi kesalahan: {e}")
                     finally:
                         if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
                         if os.path.exists(output_docx): os.unlink(output_docx)
 
-    elif convert_mode == "Word ke PDF":
+    elif convert_mode == "Word to PDF":
         st.info("💡 Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
         uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"], key="docx_uploader")
         
@@ -629,12 +628,12 @@ with tab5:
                         if os.path.exists(output_pdf):
                             with open(output_pdf, "rb") as file:
                                 st.download_button(
-                                    label="⬇️ Download Hasil PDF (.pdf)",
+                                    label="⬇️ Download PDF (.pdf)",
                                     data=file,
                                     file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
                                     mime="application/pdf"
                                 )
-                            st.success("✅ Konversi Berhasil!")
+                            st.success("Done!")
                         else:
                             st.error("❌ Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
                             
@@ -646,3 +645,120 @@ with tab5:
                         if os.path.exists(os.path.join(temp_dir, "input.pdf")): 
                             os.unlink(os.path.join(temp_dir, "input.pdf"))
                         os.rmdir(temp_dir)
+
+
+# ==========================================
+# TAB 6: SHIFT HANDOVER SUMMARIZER
+# ==========================================
+with tab6:
+    st.subheader("📋 Shift Handover Summarizer")
+    
+    raw_shift_input = st.text_area(
+        "Masukkan Raw Data (Copy-paste):", 
+        height=300,
+    )
+
+    def parse_shift_logs(raw_text):
+        # Membaca seluruh baris satu per satu tanpa peduli blok/enter kosong
+        lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+        summaries = []
+        
+        for i, line in enumerate(lines):
+            # Deteksi baris utama tiket (mengandung '/' dan format action)
+            if '/' in line and ('[' in line or 'N/A' in line):
+                parts = line.split('/')
+                
+                incident_id = "N/A"
+                alert_name = "N/A"
+                action = "N/A"
+                workspace = "N/A"
+                
+                # 1. Ekstrak Incident ID (dengan logika pemisah kode tiket)
+                if len(parts) > 0:
+                    raw_first_part = parts[0].strip()
+                    match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
+                    
+                    if match:
+                        temp_id = match.group(1)
+                    else:
+                        fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
+                        temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
+                    
+                    # --- FITUR BARU: HANYA AMBIL ANGKA SETELAH STRIP (-) ---
+                    if '-' in temp_id:
+                        incident_id = temp_id.split('-')[-1].strip()
+                    else:
+                        incident_id = temp_id
+                        
+                # 2. Ekstrak Alert Name
+                if len(parts) >= 3:
+                    alert_name = re.sub(r'\[|\]|"', '', parts[2]).strip()
+                    
+                # 3. Ekstrak Action & Workspace dari sisa teks (Tail)
+                if len(parts) >= 4:
+                    tail = "/".join(parts[3:]).strip()
+                    action_match = re.match(r'^(\[".*?"\]|N/A)(?:\s+([A-Za-z0-9_-]+))?', tail)
+                    
+                    if action_match:
+                        action_raw = action_match.group(1)
+                        action = re.sub(r'\[|\]|"', '', action_raw).strip()
+                        if action_match.group(2):
+                            workspace = action_match.group(2).strip()
+                    else:
+                        action = re.sub(r'\[|\]|"', '', parts[3]).strip()
+                        
+                # 4. Fallback Workspace
+                if workspace == "N/A" and i + 1 < len(lines):
+                    next_line = lines[i+1]
+                    if not ('/' in next_line and ('[' in next_line or 'N/A' in next_line)):
+                        workspace = next_line.split()[0]
+                
+                # Simpan data ke hasil akhir
+                if alert_name != "N/A":
+                    summaries.append({
+                        "incident_id": incident_id,
+                        "workspace": workspace,
+                        "alert_name": alert_name,
+                        "action": action
+                    })
+                    
+        return summaries
+
+    if st.button("Generate Shift Summary", type="primary"):
+        if raw_shift_input.strip():
+            with st.spinner("Merangkum data shift ke dalam template..."):
+                parsed_data = parse_shift_logs(raw_shift_input)
+                
+                if not parsed_data:
+                    st.warning("⚠️ Tidak ada data log yang valid ditemukan. Pastikan format copy-paste Anda benar.")
+                else:
+                    # Menambahkan Header "Attempts:" persis seperti permintaan
+                    output_text = "Attempts: \n\n"
+                    
+                    for idx, item in enumerate(parsed_data):
+                        output_text += f"Incident ID (Azure): {item['incident_id']}\n"
+                        output_text += f"Workspace: {item['workspace']}\n"
+                        output_text += f"Alert Name: {item['alert_name']}\n"
+                        output_text += f"Critical Assets: N/A\n"  # Di-set N/A karena tidak ada di raw log shift
+                        output_text += f"Device Action: {item['action']}\n"
+                        
+                        # Beri jarak 1 baris kosong antar alert (tanpa garis pembatas)
+                        if idx < len(parsed_data) - 1:
+                            output_text += "\n"
+                    
+                    st.success(f"Summarize {len(parsed_data)} insident!")
+                    st.text_area(
+                        "Handover Output:", 
+                        value=output_text, 
+                        height=400
+                    )
+                    
+                    # Tombol Download
+                    st.download_button(
+                        label="⬇️ Download text(.txt)",
+                        data=output_text,
+                        file_name=f"Shift_Handover_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+        else:
+            st.error("⚠️ Masukkan raw data shift terlebih dahulu di kotak atas.")
