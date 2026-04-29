@@ -554,26 +554,26 @@ with tab4:
 
 
 # ==========================================
-# TAB 5: FILE CONVERTER (PDF <-> WORD)
+# TAB 5: CLOUD DOCUMENT CONVERTER (PDF <-> WORD)
 # ==========================================
 with tab5:
-    st.subheader("📄 Local Document Converter")
-    st.markdown("Konversi file secara aman (Offline/Lokal) tanpa perlu mengunggah ke situs web pihak ketiga.")
+    st.subheader("📄 Cloud Document Converter")
+    st.markdown("Konversi file secara aman di server. Fitur ini didesain untuk bekerja di Streamlit Cloud/Hosting Linux.")
     
     # Memilih mode konversi
-    convert_mode = st.radio("Pilih Mode Konversi:", ["PDF ke Word", "Word ke PDF"])
+    convert_mode = st.radio("Pilih Mode Konversi:", ["PDF ke Word", "Word ke PDF"], key="converter_radio")
     
     if convert_mode == "PDF ke Word":
-        uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"])
+        uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"], key="pdf_uploader")
         
         if uploaded_pdf is not None:
-            if st.button("🔄 Konversi ke Word"):
+            if st.button("🔄 Konversi ke Word", key="btn_pdf_to_word"):
                 with st.spinner("Sedang memproses konversi..."):
                     import tempfile
                     import os
                     from pdf2docx import Converter
                     
-                    # 1. Simpan file yang diupload ke ruang sementara (RAM/Temp)
+                    # Simpan file yang diupload ke ruang sementara
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                         tmp_pdf.write(uploaded_pdf.getvalue())
                         tmp_pdf_path = tmp_pdf.name
@@ -581,12 +581,10 @@ with tab5:
                     output_docx = tmp_pdf_path.replace(".pdf", ".docx")
                     
                     try:
-                        # 2. Proses Konversi
                         cv = Converter(tmp_pdf_path)
                         cv.convert(output_docx)
                         cv.close()
                         
-                        # 3. Siapkan tombol download
                         with open(output_docx, "rb") as file:
                             st.download_button(
                                 label="⬇️ Download Hasil Word (.docx)",
@@ -594,43 +592,57 @@ with tab5:
                                 file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             )
-                        st.success("✅ Konversi PDF ke Word Berhasil!")
+                        st.success("✅ Konversi Berhasil!")
                     except Exception as e:
                         st.error(f"❌ Terjadi kesalahan: {e}")
                     finally:
-                        # 4. Hapus file sementara demi keamanan OPSEC
                         if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
                         if os.path.exists(output_docx): os.unlink(output_docx)
 
     elif convert_mode == "Word ke PDF":
-        st.info("💡 Catatan: Fitur ini berjalan sempurna di Localhost (Mac/Windows) yang memiliki MS Word. Jika di-deploy ke Cloud (Hugging Face), fitur ini mungkin tidak akan berfungsi.")
-        uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"])
+        st.info("💡 Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
+        uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"], key="docx_uploader")
         
         if uploaded_docx is not None:
-            if st.button("🔄 Konversi ke PDF"):
-                with st.spinner("Sedang merender PDF..."):
+            if st.button("🔄 Konversi ke PDF", key="btn_word_to_pdf"):
+                with st.spinner("Merender PDF via LibreOffice..."):
                     import tempfile
                     import os
-                    from docx2pdf import convert
+                    import subprocess
                     
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_docx:
-                        tmp_docx.write(uploaded_docx.getvalue())
-                        tmp_docx_path = tmp_docx.name
-                        
-                    output_pdf = tmp_docx_path.replace(".docx", ".pdf")
+                    # Buat direktori sementara
+                    temp_dir = tempfile.mkdtemp()
+                    tmp_docx_path = os.path.join(temp_dir, "input.docx")
+                    
+                    with open(tmp_docx_path, "wb") as f:
+                        f.write(uploaded_docx.getvalue())
                     
                     try:
-                        convert(tmp_docx_path, output_pdf)
-                        with open(output_pdf, "rb") as file:
-                            st.download_button(
-                                label="⬇️ Download Hasil PDF (.pdf)",
-                                data=file,
-                                file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
-                                mime="application/pdf"
-                            )
-                        st.success("✅ Konversi Word ke PDF Berhasil!")
+                        # Menjalankan perintah linux untuk konversi
+                        subprocess.run([
+                            "libreoffice", "--headless", "--convert-to", "pdf",
+                            "--outdir", temp_dir, tmp_docx_path
+                        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        
+                        output_pdf = os.path.join(temp_dir, "input.pdf")
+                        
+                        if os.path.exists(output_pdf):
+                            with open(output_pdf, "rb") as file:
+                                st.download_button(
+                                    label="⬇️ Download Hasil PDF (.pdf)",
+                                    data=file,
+                                    file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
+                                    mime="application/pdf"
+                                )
+                            st.success("✅ Konversi Berhasil!")
+                        else:
+                            st.error("❌ Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
+                            
                     except Exception as e:
-                        st.error(f"❌ Gagal: Pastikan Microsoft Word terinstal di mesin ini. (Error: {e})")
+                        st.error(f"❌ Terjadi kesalahan sistem: {e}")
+                        st.warning("Pastikan Anda sudah menambahkan file 'packages.txt' berisi 'libreoffice' di repository GitHub Anda.")
                     finally:
                         if os.path.exists(tmp_docx_path): os.unlink(tmp_docx_path)
-                        if os.path.exists(output_pdf): os.unlink(output_pdf)
+                        if os.path.exists(os.path.join(temp_dir, "input.pdf")): 
+                            os.unlink(os.path.join(temp_dir, "input.pdf"))
+                        os.rmdir(temp_dir)
