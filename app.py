@@ -657,7 +657,7 @@ with tab6:
     raw_shift_input = st.text_area(
         "Masukkan Raw Data (Copy-paste):", 
         height=300,
-        placeholder="D25SEPS-307726SOCNCI/Firepower/...\ncompnet-cust-sentinel\n..."
+        placeholder="250253-7783250253/Fortigate/...\nbquik-sentinel\n..."
     )
     
     def parse_shift_logs(raw_text):
@@ -670,51 +670,57 @@ with tab6:
                 
                 incident_id = "N/A"
                 alert_name = "N/A"
-                action = "N/A"
+                action = "Blocked"  # Default diubah menjadi Blocked
                 workspace = "N/A"
                 
+                # 1. Ekstrak Incident ID (Ambil SEMUA / Utuh, tidak dipotong setelah strip)
                 if len(parts) > 0:
                     raw_first_part = parts[0].strip()
                     match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
                     
                     if match:
-                        temp_id = match.group(1)
+                        incident_id = match.group(1).strip()
                     else:
                         fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
-                        temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
-                    
-                    if '-' in temp_id:
-                        incident_id = temp_id.split('-')[-1].strip()
-                    else:
-                        incident_id = temp_id
+                        incident_id = fallback_match.group(1).strip() if fallback_match else raw_first_part[:15].strip()
                         
+                # 2. Ekstrak Alert Name
                 if len(parts) >= 3:
                     alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
                     if alert_name == "-":
                         alert_name = "Unknown / No Alert Name"
                     
+                # 3. Ekstrak Action (Dengan Default Fallback)
                 if len(parts) >= 4:
                     raw_action = parts[-1].strip()
+                    temp_action = ""
                     
                     if '[' in raw_action:
                         action_match = re.match(r'^(\[".*?"\])(?:\s+([A-Za-z0-9_-]+))?', raw_action)
                         if action_match:
-                            action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
+                            temp_action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
                             if action_match.group(2):
                                 workspace = action_match.group(2).strip()
                         else:
-                            action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
+                            temp_action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
                     else:
                         if ' ' in raw_action:
                             words = raw_action.split()
                             if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1]:
                                 workspace = words[-1]
-                                action = " ".join(words[:-1]).strip()
+                                temp_action = " ".join(words[:-1]).strip()
                             else:
-                                action = raw_action
+                                temp_action = raw_action
                         else:
-                            action = raw_action
+                            temp_action = raw_action
+                            
+                    # Jika action dari log valid (bukan N/A atau kosong), gunakan itu. 
+                    # Jika tidak, biarkan default "Blocked"
+                    if temp_action and temp_action.upper() not in ["N/A", "N", "-", ""]:
+                        # Memperbaiki huruf pertama agar kapital (Opsional, agar rapi)
+                        action = temp_action.capitalize() if temp_action.islower() else temp_action
                         
+                # 4. Fallback Workspace
                 if workspace == "N/A" and i + 1 < len(lines):
                     next_line = lines[i+1]
                     if not ('/' in next_line and len(next_line.split('/')) >= 3):
@@ -730,7 +736,7 @@ with tab6:
                     
         return summaries
 
-    # --- PASTIKAN TOMBOL INI SEJAJAR DENGAN 'def parse_shift_logs' DI ATAS ---
+    # --- PASTIKAN TOMBOL INI SEJAJAR DENGAN 'def parse_shift_logs' ---
     if st.button("Generate Shift Summary", type="primary"):
         if raw_shift_input.strip():
             with st.spinner("Merangkum data shift ke dalam template..."):
@@ -745,7 +751,7 @@ with tab6:
                         output_text += f"Incident ID (Azure): {item['incident_id']}\n"
                         output_text += f"Workspace: {item['workspace']}\n"
                         output_text += f"Alert Name: {item['alert_name']}\n"
-                        output_text += f"Critical Assets: N/A\n" 
+                        output_text += f"Critical Assets: No\n"  # Berubah permanen menjadi 'No'
                         output_text += f"Device Action: {item['action']}\n"
                         
                         if idx < len(parsed_data) - 1:
