@@ -659,115 +659,85 @@ with tab6:
     )
 
     def parse_shift_logs(raw_text):
-        # Membaca seluruh baris satu per satu tanpa peduli blok/enter kosong
-        lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-        summaries = []
-        
-        for i, line in enumerate(lines):
-            # Deteksi baris utama tiket (mengandung '/' dan format action)
-            if '/' in line and ('[' in line or 'N/A' in line):
-                parts = line.split('/')
-                
-                incident_id = "N/A"
-                alert_name = "N/A"
-                action = "N/A"
-                workspace = "N/A"
-                
-                # 1. Ekstrak Incident ID (Super Fallback)
-                if len(parts) > 0:
-                    raw_first_part = parts[0].strip()
+            # Membaca seluruh baris satu per satu tanpa peduli blok/enter kosong
+            lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+            summaries = []
+            
+            for i, line in enumerate(lines):
+                # Cek apakah baris merupakan log tiket (minimal punya 3 garis miring)
+                if '/' in line and len(line.split('/')) >= 3:
+                    parts = line.split('/')
                     
-                    # Skenario A: Teks menempel (D25SEPS-307726SOCNCI)
-                    match_glued = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
-                    if match_glued and '-' in match_glued.group(1):
-                        incident_id = match_glued.group(1).split('-')[-1].strip()
+                    incident_id = "N/A"
+                    alert_name = "N/A"
+                    action = "N/A"
+                    workspace = "N/A"
+                    
+                    # 1. Ekstrak Incident ID (dengan pemotong kode tiket)
+                    if len(parts) > 0:
+                        raw_first_part = parts[0].strip()
+                        match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
                         
-                    # Skenario B: Ada spasi (D25SEPS-3077 26SOCNCI)
-                    elif '-' in raw_first_part and ' ' in raw_first_part:
-                        temp_id = raw_first_part.split()[0]
-                        incident_id = temp_id.split('-')[-1].strip() if '-' in temp_id else temp_id
-                        
-                    # Skenario C: Terpisah di baris atasnya (Copy-paste tabel baru)
-                    elif not '-' in raw_first_part:
-                        # Jika tidak ada strip, berarti ID aslinya tertinggal di baris sebelumnya
-                        if i > 0 and '-' in lines[i-1]:
-                            incident_id = lines[i-1].split('-')[-1].strip()
+                        if match:
+                            temp_id = match.group(1)
                         else:
-                            incident_id = raw_first_part
+                            fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
+                            temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
+                        
+                        # Hanya ambil angka setelah strip (-)
+                        if '-' in temp_id:
+                            incident_id = temp_id.split('-')[-1].strip()
+                        else:
+                            incident_id = temp_id
                             
-                    # Skenario D: Normal (D25SEPS-3077)
-                    elif '-' in raw_first_part:
-                        incident_id = raw_first_part.split('-')[-1].strip()
-
-                # 2. Ekstrak Alert Name (Ditambah pembersih backslash '\')
-                if len(parts) >= 3:
-                    alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
-                    
-                # 3. Ekstrak Action & Workspace dari sisa teks (Tail)
-                if len(parts) >= 4:
-                    tail = "/".join(parts[3:]).strip()
-                    action_match = re.match(r'^(\[".*?"\]|N/A)(?:\s+([A-Za-z0-9_-]+))?', tail)
-                    
-                    if action_match:
-                        action_raw = action_match.group(1)
-                        action = re.sub(r'[\[\]\"\\]', '', action_raw).strip()
-                        if action_match.group(2):
-                            workspace = action_match.group(2).strip()
-                    else:
-                        action = re.sub(r'[\[\]\"\\]', '', parts[3]).strip()
+                    # 2. Ekstrak Alert Name
+                    if len(parts) >= 3:
+                        alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
+                        # Menghandle jika alert name kosong (hanya berisi tanda '-')
+                        if alert_name == "-":
+                            alert_name = "Unknown / No Alert Name"
                         
-                # 4. Fallback Workspace
-                if workspace == "N/A" and i + 1 < len(lines):
-                    next_line = lines[i+1]
-                    if not ('/' in next_line and ('[' in next_line or 'N/A' in next_line)):
-                        workspace = next_line.split()[0]
-                
-                # Simpan data ke hasil akhir
-                if alert_name != "N/A":
-                    summaries.append({
-                        "incident_id": incident_id,
-                        "workspace": workspace,
-                        "alert_name": alert_name,
-                        "action": action
-                    })
-                    
-        return summaries
-
-    if st.button("Generate Shift Summary", type="primary"):
-        if raw_shift_input.strip():
-            with st.spinner("Merangkum data shift ke dalam template..."):
-                parsed_data = parse_shift_logs(raw_shift_input)
-                
-                if not parsed_data:
-                    st.warning("⚠️ Tidak ada data log yang valid ditemukan. Pastikan format copy-paste Anda benar.")
-                else:
-                    # Menambahkan Header "Attempts:" persis seperti permintaan
-                    output_text = "Attempts: \n\n"
-                    
-                    for idx, item in enumerate(parsed_data):
-                        output_text += f"Incident ID (Azure): {item['incident_id']}\n"
-                        output_text += f"Workspace: {item['workspace']}\n"
-                        output_text += f"Alert Name: {item['alert_name']}\n"
-                        output_text += f"Critical Assets: N/A\n"  # Di-set N/A karena tidak ada di raw log shift
-                        output_text += f"Device Action: {item['action']}\n"
+                    # 3. Ekstrak Action (Mengambil elemen PALING BELAKANG / parts[-1])
+                    if len(parts) >= 4:
+                        raw_action = parts[-1].strip()
                         
-                        # Beri jarak 1 baris kosong antar alert (tanpa garis pembatas)
-                        if idx < len(parsed_data) - 1:
-                            output_text += "\n"
+                        # Skenario A: Jika Action memiliki bracket ("["Blocked"]")
+                        if '[' in raw_action:
+                            action_match = re.match(r'^(\[".*?"\])(?:\s+([A-Za-z0-9_-]+))?', raw_action)
+                            if action_match:
+                                action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
+                                if action_match.group(2):
+                                    workspace = action_match.group(2).strip()
+                            else:
+                                action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
+                                
+                        # Skenario B: Jika Action polosan (seperti: "blocked", "dropped", "N/A")
+                        else:
+                            if ' ' in raw_action:
+                                words = raw_action.split()
+                                # Jika tiba-tiba ada workspace menempel (contoh: "blocked bquik-sentinel")
+                                if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1]:
+                                    workspace = words[-1]
+                                    action = " ".join(words[:-1]).strip()
+                                else:
+                                    action = raw_action
+                            else:
+                                action = raw_action
+                            
+                    # 4. Fallback Workspace (Cari di baris bawahnya)
+                    if workspace == "N/A" and i + 1 < len(lines):
+                        next_line = lines[i+1]
+                        # Pastikan baris bawah bukan tiket baru
+                        if not ('/' in next_line and len(next_line.split('/')) >= 3):
+                            workspace = next_line.split()[0]
                     
-                    st.success(f"Summarize {len(parsed_data)} insident!")
-                    st.text_area(
-                        "Handover Output:", 
-                        value=output_text, 
-                        height=400
-                    )
-                    
-                    # Tombol Download
-                    st.download_button(
-                        label="⬇️ Download text(.txt)",
-                        data=output_text,
-                        file_name=f"Shift_Handover_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
-        else:
-            st.error("⚠️ Masukkan raw data shift terlebih dahulu di kotak atas.")
+                    # Simpan data ke hasil akhir
+                    if alert_name != "N/A":
+                        summaries.append({
+                            "incident_id": incident_id,
+                            "workspace": workspace,
+                            "alert_name": alert_name,
+                            "action": action
+                        })
+                        
+            return summaries
