@@ -688,7 +688,7 @@ with tab6:
                 if len(parts) >= 3:
                     alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
                     if alert_name == "-":
-                        alert_name = "Unknown / No Alert Name"
+                        alert_name = "-"
                     
                 # 3. Ekstrak Action (Dengan Default Fallback)
                 if len(parts) >= 4:
