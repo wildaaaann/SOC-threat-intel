@@ -665,15 +665,17 @@ with tab6:
         summaries = []
         
         for i, line in enumerate(lines):
+            # 1. Deteksi Baris Tiket Baru
             if '/' in line and len(line.split('/')) >= 3:
                 parts = line.split('/')
                 
                 incident_id = "N/A"
                 alert_name = "N/A"
-                action = "Blocked"  # Default diubah menjadi Blocked
+                action = "Blocked"  
                 workspace = "N/A"
+                status = "Attempt" # Default kategori jika tidak ada keterangan
                 
-                # 1. Ekstrak Incident ID (Ambil SEMUA / Utuh, tidak dipotong setelah strip)
+                # Ekstrak Incident ID (Ambil UTUH beserta strip)
                 if len(parts) > 0:
                     raw_first_part = parts[0].strip()
                     match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
@@ -684,13 +686,13 @@ with tab6:
                         fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
                         incident_id = fallback_match.group(1).strip() if fallback_match else raw_first_part[:15].strip()
                         
-                # 2. Ekstrak Alert Name
+                # Ekstrak Alert Name
                 if len(parts) >= 3:
                     alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
                     if alert_name == "-":
-                        alert_name = "-"
+                        alert_name = "Unknown / No Alert Name"
                     
-                # 3. Ekstrak Action (Dengan Default Fallback)
+                # Ekstrak Action 
                 if len(parts) >= 4:
                     raw_action = parts[-1].strip()
                     temp_action = ""
@@ -714,13 +716,10 @@ with tab6:
                         else:
                             temp_action = raw_action
                             
-                    # Jika action dari log valid (bukan N/A atau kosong), gunakan itu. 
-                    # Jika tidak, biarkan default "Blocked"
                     if temp_action and temp_action.upper() not in ["N/A", "N", "-", ""]:
-                        # Memperbaiki huruf pertama agar kapital (Opsional, agar rapi)
                         action = temp_action.capitalize() if temp_action.islower() else temp_action
                         
-                # 4. Fallback Workspace
+                # Fallback Workspace
                 if workspace == "N/A" and i + 1 < len(lines):
                     next_line = lines[i+1]
                     if not ('/' in next_line and len(next_line.split('/')) >= 3):
@@ -731,8 +730,17 @@ with tab6:
                         "incident_id": incident_id,
                         "workspace": workspace,
                         "alert_name": alert_name,
-                        "action": action
+                        "action": action,
+                        "status": status
                     })
+            
+            # 2. Update Kategori Berdasarkan Flag (TruePositive / BenignPositive)
+            elif "TruePositive" in line or "BenignPositive" in line:
+                if summaries:  # Pastikan sudah ada tiket yang tersimpan sebelumnya
+                    if "TruePositive" in line:
+                        summaries[-1]["status"] = "Incident"
+                    elif "BenignPositive" in line:
+                        summaries[-1]["status"] = "Attempt"
                     
         return summaries
 
@@ -745,23 +753,44 @@ with tab6:
                 if not parsed_data:
                     st.warning("⚠️ Tidak ada data log yang valid ditemukan.")
                 else:
-                    output_text = "Attempts: \n\n"
+                    # Memisahkan data berdasarkan kategori
+                    incidents = [s for s in parsed_data if s["status"] == "Incident"]
+                    attempts = [s for s in parsed_data if s["status"] == "Attempt"]
                     
-                    for idx, item in enumerate(parsed_data):
-                        output_text += f"Incident ID (Azure): {item['incident_id']}\n"
-                        output_text += f"Workspace: {item['workspace']}\n"
-                        output_text += f"Alert Name: {item['alert_name']}\n"
-                        output_text += f"Critical Assets: No\n"  # Berubah permanen menjadi 'No'
-                        output_text += f"Device Action: {item['action']}\n"
-                        
-                        if idx < len(parsed_data) - 1:
-                            output_text += "\n"
+                    output_text = ""
                     
-                    st.success(f"Berhasil merangkum {len(parsed_data)} insiden!")
+                    # 1. Cetak Blok Incidents (TruePositive)
+                    if incidents:
+                        output_text += "Incidents :\n\n"
+                        for idx, item in enumerate(incidents):
+                            output_text += f"Incident ID (Azure): {item['incident_id']}\n"
+                            output_text += f"Workspace: {item['workspace']}\n"
+                            output_text += f"Alert Name: {item['alert_name']}\n"
+                            output_text += f"Critical Assets: No\n"
+                            output_text += f"Device Action: {item['action']}\n"
+                            
+                            # Beri spasi bawah jika ini bukan tiket terakhir, atau jika masih ada blok Attempts di bawahnya
+                            if idx < len(incidents) - 1 or attempts:
+                                output_text += "\n"
+                    
+                    # 2. Cetak Blok Attempts (BenignPositive)
+                    if attempts:
+                        output_text += "Attempts :\n\n"
+                        for idx, item in enumerate(attempts):
+                            output_text += f"Incident ID (Azure): {item['incident_id']}\n"
+                            output_text += f"Workspace: {item['workspace']}\n"
+                            output_text += f"Alert Name: {item['alert_name']}\n"
+                            output_text += f"Critical Assets: No\n"
+                            output_text += f"Device Action: {item['action']}\n"
+                            
+                            if idx < len(attempts) - 1:
+                                output_text += "\n"
+                    
+                    st.success(f"Berhasil merangkum {len(incidents)} Incidents dan {len(attempts)} Attempts!")
                     st.text_area(
                         "📋 Plaintext Handover Output (Siap Copy-Paste):", 
                         value=output_text, 
-                        height=400
+                        height=500
                     )
                     
                     st.download_button(
