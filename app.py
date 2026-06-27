@@ -556,95 +556,95 @@ with tab4:
 # ==========================================
 # TAB 5: CLOUD DOCUMENT CONVERTER (PDF <-> WORD)
 # ==========================================
-with tab5:
-    st.subheader("📄 Cloud Document Converter")
+# with tab5:
+#     st.subheader("📄 Cloud Document Converter")
     
-    # Memilih mode konversi
-    convert_mode = st.radio("Type:", ["PDF to Word", "Word to PDF"], key="converter_radio")
+#     # Memilih mode konversi
+#     convert_mode = st.radio("Type:", ["PDF to Word", "Word to PDF"], key="converter_radio")
     
-    if convert_mode == "PDF to Word":
-        uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"], key="pdf_uploader")
+#     if convert_mode == "PDF to Word":
+#         uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"], key="pdf_uploader")
         
-        if uploaded_pdf is not None:
-            if st.button("🔄 Konversi ke Word", key="btn_pdf_to_word"):
-                with st.spinner("memproses konversi..."):
-                    import tempfile
-                    import os
-                    from pdf2docx import Converter
+#         if uploaded_pdf is not None:
+#             if st.button("🔄 Konversi ke Word", key="btn_pdf_to_word"):
+#                 with st.spinner("memproses konversi..."):
+#                     import tempfile
+#                     import os
+#                     from pdf2docx import Converter
                     
-                    # Simpan file yang diupload ke ruang sementara
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                        tmp_pdf.write(uploaded_pdf.getvalue())
-                        tmp_pdf_path = tmp_pdf.name
+#                     # Simpan file yang diupload ke ruang sementara
+#                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+#                         tmp_pdf.write(uploaded_pdf.getvalue())
+#                         tmp_pdf_path = tmp_pdf.name
                         
-                    output_docx = tmp_pdf_path.replace(".pdf", ".docx")
+#                     output_docx = tmp_pdf_path.replace(".pdf", ".docx")
                     
-                    try:
-                        cv = Converter(tmp_pdf_path)
-                        cv.convert(output_docx)
-                        cv.close()
+#                     try:
+#                         cv = Converter(tmp_pdf_path)
+#                         cv.convert(output_docx)
+#                         cv.close()
                         
-                        with open(output_docx, "rb") as file:
-                            st.download_button(
-                                label="⬇️ Download Word (.docx)",
-                                data=file,
-                                file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                        st.success("Done!")
-                    except Exception as e:
-                        st.error(f"❌ Terjadi kesalahan: {e}")
-                    finally:
-                        if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
-                        if os.path.exists(output_docx): os.unlink(output_docx)
+#                         with open(output_docx, "rb") as file:
+#                             st.download_button(
+#                                 label="⬇️ Download Word (.docx)",
+#                                 data=file,
+#                                 file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
+#                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+#                             )
+#                         st.success("Done!")
+#                     except Exception as e:
+#                         st.error(f"❌ Terjadi kesalahan: {e}")
+#                     finally:
+#                         if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
+#                         if os.path.exists(output_docx): os.unlink(output_docx)
 
-    elif convert_mode == "Word to PDF":
-        st.info("💡 Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
-        uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"], key="docx_uploader")
+#     elif convert_mode == "Word to PDF":
+#         st.info("💡 Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
+#         uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"], key="docx_uploader")
         
-        if uploaded_docx is not None:
-            if st.button("🔄 Konversi ke PDF", key="btn_word_to_pdf"):
-                with st.spinner("Merender PDF via LibreOffice..."):
-                    import tempfile
-                    import os
-                    import subprocess
+#         if uploaded_docx is not None:
+#             if st.button("🔄 Konversi ke PDF", key="btn_word_to_pdf"):
+#                 with st.spinner("Merender PDF via LibreOffice..."):
+#                     import tempfile
+#                     import os
+#                     import subprocess
                     
-                    # Buat direktori sementara
-                    temp_dir = tempfile.mkdtemp()
-                    tmp_docx_path = os.path.join(temp_dir, "input.docx")
+#                     # Buat direktori sementara
+#                     temp_dir = tempfile.mkdtemp()
+#                     tmp_docx_path = os.path.join(temp_dir, "input.docx")
                     
-                    with open(tmp_docx_path, "wb") as f:
-                        f.write(uploaded_docx.getvalue())
+#                     with open(tmp_docx_path, "wb") as f:
+#                         f.write(uploaded_docx.getvalue())
                     
-                    try:
-                        # Menjalankan perintah linux untuk konversi
-                        subprocess.run([
-                            "libreoffice", "--headless", "--convert-to", "pdf",
-                            "--outdir", temp_dir, tmp_docx_path
-                        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+#                     try:
+#                         # Menjalankan perintah linux untuk konversi
+#                         subprocess.run([
+#                             "libreoffice", "--headless", "--convert-to", "pdf",
+#                             "--outdir", temp_dir, tmp_docx_path
+#                         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
-                        output_pdf = os.path.join(temp_dir, "input.pdf")
+#                         output_pdf = os.path.join(temp_dir, "input.pdf")
                         
-                        if os.path.exists(output_pdf):
-                            with open(output_pdf, "rb") as file:
-                                st.download_button(
-                                    label="⬇️ Download PDF (.pdf)",
-                                    data=file,
-                                    file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
-                                    mime="application/pdf"
-                                )
-                            st.success("Done!")
-                        else:
-                            st.error("❌ Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
+#                         if os.path.exists(output_pdf):
+#                             with open(output_pdf, "rb") as file:
+#                                 st.download_button(
+#                                     label="⬇️ Download PDF (.pdf)",
+#                                     data=file,
+#                                     file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
+#                                     mime="application/pdf"
+#                                 )
+#                             st.success("Done!")
+#                         else:
+#                             st.error("❌ Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
                             
-                    except Exception as e:
-                        st.error(f"❌ Terjadi kesalahan sistem: {e}")
-                        st.warning("Pastikan Anda sudah menambahkan file 'packages.txt' berisi 'libreoffice' di repository GitHub Anda.")
-                    finally:
-                        if os.path.exists(tmp_docx_path): os.unlink(tmp_docx_path)
-                        if os.path.exists(os.path.join(temp_dir, "input.pdf")): 
-                            os.unlink(os.path.join(temp_dir, "input.pdf"))
-                        os.rmdir(temp_dir)
+#                     except Exception as e:
+#                         st.error(f"❌ Terjadi kesalahan sistem: {e}")
+#                         st.warning("Pastikan Anda sudah menambahkan file 'packages.txt' berisi 'libreoffice' di repository GitHub Anda.")
+#                     finally:
+#                         if os.path.exists(tmp_docx_path): os.unlink(tmp_docx_path)
+#                         if os.path.exists(os.path.join(temp_dir, "input.pdf")): 
+#                             os.unlink(os.path.join(temp_dir, "input.pdf"))
+#                         os.rmdir(temp_dir)
 
 
 # ==========================================
@@ -652,92 +652,117 @@ with tab5:
 # ==========================================
 with tab6:
     st.subheader("📋 Shift Handover Summarizer")
+    st.markdown("Otomatis mengekstrak dan merangkum raw log tiket shift menjadi format template standar.")
     
     raw_shift_input = st.text_area(
         "Masukkan Raw Data (Copy-paste):", 
         height=300,
+        placeholder="D25SEPS-307726SOCNCI/Firepower/...\ncompnet-cust-sentinel\n..."
     )
-
+    
     def parse_shift_logs(raw_text):
-            # Membaca seluruh baris satu per satu tanpa peduli blok/enter kosong
-            lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-            summaries = []
-            
-            for i, line in enumerate(lines):
-                # Cek apakah baris merupakan log tiket (minimal punya 3 garis miring)
-                if '/' in line and len(line.split('/')) >= 3:
-                    parts = line.split('/')
+        lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+        summaries = []
+        
+        for i, line in enumerate(lines):
+            if '/' in line and len(line.split('/')) >= 3:
+                parts = line.split('/')
+                
+                incident_id = "N/A"
+                alert_name = "N/A"
+                action = "N/A"
+                workspace = "N/A"
+                
+                if len(parts) > 0:
+                    raw_first_part = parts[0].strip()
+                    match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
                     
-                    incident_id = "N/A"
-                    alert_name = "N/A"
-                    action = "N/A"
-                    workspace = "N/A"
+                    if match:
+                        temp_id = match.group(1)
+                    else:
+                        fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
+                        temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
                     
-                    # 1. Ekstrak Incident ID (dengan pemotong kode tiket)
-                    if len(parts) > 0:
-                        raw_first_part = parts[0].strip()
-                        match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
+                    if '-' in temp_id:
+                        incident_id = temp_id.split('-')[-1].strip()
+                    else:
+                        incident_id = temp_id
                         
-                        if match:
-                            temp_id = match.group(1)
+                if len(parts) >= 3:
+                    alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
+                    if alert_name == "-":
+                        alert_name = "Unknown / No Alert Name"
+                    
+                if len(parts) >= 4:
+                    raw_action = parts[-1].strip()
+                    
+                    if '[' in raw_action:
+                        action_match = re.match(r'^(\[".*?"\])(?:\s+([A-Za-z0-9_-]+))?', raw_action)
+                        if action_match:
+                            action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
+                            if action_match.group(2):
+                                workspace = action_match.group(2).strip()
                         else:
-                            fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
-                            temp_id = fallback_match.group(1) if fallback_match else raw_first_part[:12]
-                        
-                        # Hanya ambil angka setelah strip (-)
-                        if '-' in temp_id:
-                            incident_id = temp_id.split('-')[-1].strip()
-                        else:
-                            incident_id = temp_id
-                            
-                    # 2. Ekstrak Alert Name
-                    if len(parts) >= 3:
-                        alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
-                        # Menghandle jika alert name kosong (hanya berisi tanda '-')
-                        if alert_name == "-":
-                            alert_name = "Unknown / No Alert Name"
-                        
-                    # 3. Ekstrak Action (Mengambil elemen PALING BELAKANG / parts[-1])
-                    if len(parts) >= 4:
-                        raw_action = parts[-1].strip()
-                        
-                        # Skenario A: Jika Action memiliki bracket ("["Blocked"]")
-                        if '[' in raw_action:
-                            action_match = re.match(r'^(\[".*?"\])(?:\s+([A-Za-z0-9_-]+))?', raw_action)
-                            if action_match:
-                                action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
-                                if action_match.group(2):
-                                    workspace = action_match.group(2).strip()
-                            else:
-                                action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
-                                
-                        # Skenario B: Jika Action polosan (seperti: "blocked", "dropped", "N/A")
-                        else:
-                            if ' ' in raw_action:
-                                words = raw_action.split()
-                                # Jika tiba-tiba ada workspace menempel (contoh: "blocked bquik-sentinel")
-                                if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1]:
-                                    workspace = words[-1]
-                                    action = " ".join(words[:-1]).strip()
-                                else:
-                                    action = raw_action
+                            action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
+                    else:
+                        if ' ' in raw_action:
+                            words = raw_action.split()
+                            if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1]:
+                                workspace = words[-1]
+                                action = " ".join(words[:-1]).strip()
                             else:
                                 action = raw_action
-                            
-                    # 4. Fallback Workspace (Cari di baris bawahnya)
-                    if workspace == "N/A" and i + 1 < len(lines):
-                        next_line = lines[i+1]
-                        # Pastikan baris bawah bukan tiket baru
-                        if not ('/' in next_line and len(next_line.split('/')) >= 3):
-                            workspace = next_line.split()[0]
-                    
-                    # Simpan data ke hasil akhir
-                    if alert_name != "N/A":
-                        summaries.append({
-                            "incident_id": incident_id,
-                            "workspace": workspace,
-                            "alert_name": alert_name,
-                            "action": action
-                        })
+                        else:
+                            action = raw_action
                         
-            return summaries
+                if workspace == "N/A" and i + 1 < len(lines):
+                    next_line = lines[i+1]
+                    if not ('/' in next_line and len(next_line.split('/')) >= 3):
+                        workspace = next_line.split()[0]
+                
+                if alert_name != "N/A":
+                    summaries.append({
+                        "incident_id": incident_id,
+                        "workspace": workspace,
+                        "alert_name": alert_name,
+                        "action": action
+                    })
+                    
+        return summaries
+
+    # --- PASTIKAN TOMBOL INI SEJAJAR DENGAN 'def parse_shift_logs' DI ATAS ---
+    if st.button("Generate Shift Summary", type="primary"):
+        if raw_shift_input.strip():
+            with st.spinner("Merangkum data shift ke dalam template..."):
+                parsed_data = parse_shift_logs(raw_shift_input)
+                
+                if not parsed_data:
+                    st.warning("⚠️ Tidak ada data log yang valid ditemukan.")
+                else:
+                    output_text = "Attempts: \n\n"
+                    
+                    for idx, item in enumerate(parsed_data):
+                        output_text += f"Incident ID (Azure): {item['incident_id']}\n"
+                        output_text += f"Workspace: {item['workspace']}\n"
+                        output_text += f"Alert Name: {item['alert_name']}\n"
+                        output_text += f"Critical Assets: N/A\n" 
+                        output_text += f"Device Action: {item['action']}\n"
+                        
+                        if idx < len(parsed_data) - 1:
+                            output_text += "\n"
+                    
+                    st.success(f"Berhasil merangkum {len(parsed_data)} insiden!")
+                    st.text_area(
+                        "📋 Plaintext Handover Output (Siap Copy-Paste):", 
+                        value=output_text, 
+                        height=400
+                    )
+                    
+                    st.download_button(
+                        label="⬇️ Download Rangkuman (.txt)",
+                        data=output_text,
+                        file_name=f"Shift_Handover_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+        else:
+            st.error("⚠️ Masukkan raw data shift terlebih dahulu di kotak atas.")
