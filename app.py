@@ -665,7 +665,7 @@ with tab6:
         summaries = []
         
         for i, line in enumerate(lines):
-            # 1. Deteksi Baris Tiket Baru (Mengandung minimal 3 garis miring)
+            # 1. Deteksi Baris Tiket Baru
             if '/' in line and len(line.split('/')) >= 3:
                 parts = line.split('/')
                 
@@ -673,86 +673,63 @@ with tab6:
                 alert_name = "N/A"
                 action = "Blocked"  
                 workspace = "N/A"
-                status = "Attempt" # Default
-                ticket_state = "Closed" # Default akan diperbarui nanti
+                status = "Attempt"
                 
-                # --- EKSTRAK INCIDENT ID (Utuh beserta strip) ---
-                if len(parts) > 0:
-                    raw_first_part = parts[0].strip()
-                    match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
-                    
-                    if match:
-                        incident_id = match.group(1).strip()
-                    else:
-                        fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
-                        incident_id = fallback_match.group(1).strip() if fallback_match else raw_first_part[:15].strip()
+                # --- 1. EKSTRAK INCIDENT ID (Pencarian Teks-Angka Absolut) ---
+                id_match = re.search(r'([A-Za-z0-9]+-\d+)', parts[0])
+                if id_match:
+                    incident_id = id_match.group(1).strip()
+                else:
+                    incident_id = parts[0][:15].strip()
                         
-                # --- EKSTRAK ALERT NAME (Smart Join Anti-Potong) ---
-                # Sistem akan mencari level severity (Low/Medium/High) dari belakang
+                # --- 2. EKSTRAK ALERT NAME (Mencari Batas Severity dari Belakang) ---
                 severity_levels = ["Low", "Medium", "High", "Critical", "Informational", "-"]
+                sev_index = -1
                 
-                # Jika formatnya baku, gabungkan kembali nama alert yang memiliki '/' di dalamnya
-                if len(parts) >= 6 and parts[-3].strip() in severity_levels:
-                    alert_name = "/".join(parts[2:-3]).strip()
-                elif len(parts) >= 3:
-                    alert_name = parts[2].strip()
+                for j in range(len(parts)-1, 1, -1):
+                    if parts[j].strip() in severity_levels:
+                        sev_index = j
+                        break
+                
+                if sev_index != -1:
+                    alert_name = "/".join(parts[2:sev_index]).strip()
+                else:
+                    alert_name = "/".join(parts[2:-2]).strip() if len(parts) >= 5 else parts[2].strip()
                     
                 alert_name = re.sub(r'[\[\]\"\\]', '', alert_name).strip()
                 if alert_name == "-":
                     alert_name = "Unknown / No Alert Name"
                     
-                # --- EKSTRAK ACTION ---
-                if len(parts) >= 4:
-                    raw_action = parts[-1].strip()
-                    temp_action = ""
-                    
-                    if '[' in raw_action:
-                        action_match = re.match(r'^(\[".*?"\])(?:\s+([A-Za-z0-9_-]+))?', raw_action)
-                        if action_match:
-                            temp_action = re.sub(r'[\[\]\"\\]', '', action_match.group(1)).strip()
-                            if action_match.group(2):
-                                workspace = action_match.group(2).strip()
-                        else:
-                            temp_action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
-                    else:
-                        if ' ' in raw_action:
-                            words = raw_action.split()
-                            # Menambahkan 'maps' ke pengenalan workspace
-                            if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1] or "maps" in words[-1]:
-                                workspace = words[-1]
-                                temp_action = " ".join(words[:-1]).strip()
-                            else:
-                                temp_action = raw_action
-                        else:
-                            temp_action = raw_action
-                            
-                    if temp_action and temp_action.upper() not in ["N/A", "N", "-", ""]:
-                        action = temp_action.capitalize() if temp_action.islower() else temp_action
+                # --- 3. EKSTRAK ACTION (Pembersihan Cerdas) ---
+                raw_action = parts[-1].strip()
+                temp_action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
+                
+                words = temp_action.split()
+                if len(words) > 1 and any(ws in words[-1].lower() for ws in ['-sentinel', 'compnet', 'namicoh', 'bquik', 'maps']):
+                    workspace = words[-1]
+                    temp_action = " ".join(words[:-1]).strip()
+                
+                if temp_action.upper() not in ["N/A", "N", "-", ""]:
+                    # Biarkan format angka seperti 404,200 tidak berubah
+                    action = temp_action.capitalize() if temp_action.isalpha() and temp_action.islower() else temp_action
                         
-                # --- FALLBACK WORKSPACE ---
+                # --- 4. FALLBACK WORKSPACE ---
                 if workspace == "N/A" and i + 1 < len(lines):
                     next_line = lines[i+1]
                     if not ('/' in next_line and len(next_line.split('/')) >= 3):
                         workspace = next_line.split()[0]
                 
-                # Simpan Data Sementara
                 if alert_name != "N/A":
                     summaries.append({
                         "incident_id": incident_id,
                         "workspace": workspace,
                         "alert_name": alert_name,
                         "action": action,
-                        "status": status,
-                        "ticket_state": ticket_state
+                        "status": status
                     })
             
-            # 2. Update Status & State berdasarkan flag di baris mana pun
+            # --- 5. UPDATE FLAG STATUS ---
             if summaries:
-                if "INCIDENT OPEN" in line:
-                    summaries[-1]["ticket_state"] = "Open"
-                elif "INCIDENT CLOSED" in line:
-                    summaries[-1]["ticket_state"] = "Closed"
-                    
                 if "TruePositive" in line:
                     summaries[-1]["status"] = "Incident"
                 elif "BenignPositive" in line:
@@ -760,7 +737,6 @@ with tab6:
                     
         return summaries
 
-    # --- TOMBOL GENERATE ---
     if st.button("Generate Shift Summary", type="primary"):
         if raw_shift_input.strip():
             with st.spinner("Merangkum data shift ke dalam template..."):
@@ -769,15 +745,13 @@ with tab6:
                 if not parsed_data:
                     st.warning("⚠️ Tidak ada data log yang valid ditemukan.")
                 else:
-                    # Memisahkan data berdasarkan kategori
                     incidents = [s for s in parsed_data if s["status"] == "Incident"]
                     attempts = [s for s in parsed_data if s["status"] == "Attempt"]
                     
-                    # Menghitung Otomatis Tiket Aktif & Closed
-                    active_count = sum(1 for s in parsed_data if s["ticket_state"] == "Open")
-                    closed_count = sum(1 for s in parsed_data if s["ticket_state"] == "Closed")
+                    # Logika perhitungan sesuai instruksi: Active 0, Closed mengikuti jumlah tiket
+                    active_count = 0
+                    closed_count = len(parsed_data)
                     
-                    # --- MENYUSUN HEADER END OF SHIFT REPORT ---
                     output_text = "End of Shift Report\n\n"
                     output_text += "✅ Analyst: M. Wildan\n"
                     output_text += "✅ Shift: 07:30-19:30 / 19:30-07:30 / 20:00-08:00\n"
@@ -791,7 +765,6 @@ with tab6:
                     
                     output_text += "==============================================\n\n"
                     
-                    # 1. Cetak Blok Incidents (TruePositive)
                     if incidents:
                         output_text += "Incidents :\n\n"
                         for idx, item in enumerate(incidents):
@@ -804,7 +777,6 @@ with tab6:
                             if idx < len(incidents) - 1 or attempts:
                                 output_text += "\n"
                     
-                    # 2. Cetak Blok Attempts (BenignPositive)
                     if attempts:
                         output_text += "Attempts :\n\n"
                         for idx, item in enumerate(attempts):
