@@ -2,4 +2,4 @@ streamlit
 requests
 urllib3
 google-genai
-pdf2docx
+# pdf2docx
