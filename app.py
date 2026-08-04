@@ -661,81 +661,86 @@ with tab6:
     )
     
     def parse_shift_logs(raw_text):
-        lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-        summaries = []
-        
-        for i, line in enumerate(lines):
-            # 1. Deteksi Baris Tiket Baru
-            if '/' in line and len(line.split('/')) >= 3:
-                parts = line.split('/')
-                
-                incident_id = "N/A"
-                alert_name = "N/A"
-                action = "Blocked"  
-                workspace = "N/A"
-                status = "Attempt"
-                
-                # --- 1. EKSTRAK INCIDENT ID (Pencarian Teks-Angka Absolut) ---
-                id_match = re.search(r'([A-Za-z0-9]+-\d+)', parts[0])
-                if id_match:
-                    incident_id = id_match.group(1).strip()
-                else:
-                    incident_id = parts[0][:15].strip()
-                        
-                # --- 2. EKSTRAK ALERT NAME (Mencari Batas Severity dari Belakang) ---
-                severity_levels = ["Low", "Medium", "High", "Critical", "Informational", "-"]
-                sev_index = -1
-                
-                for j in range(len(parts)-1, 1, -1):
-                    if parts[j].strip() in severity_levels:
-                        sev_index = j
-                        break
-                
-                if sev_index != -1:
-                    alert_name = "/".join(parts[2:sev_index]).strip()
-                else:
-                    alert_name = "/".join(parts[2:-2]).strip() if len(parts) >= 5 else parts[2].strip()
-                    
-                alert_name = re.sub(r'[\[\]\"\\]', '', alert_name).strip()
-                if alert_name == "-":
-                    alert_name = "Unknown / No Alert Name"
-                    
-                # --- 3. EKSTRAK ACTION (Pembersihan Cerdas) ---
-                raw_action = parts[-1].strip()
-                temp_action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
-                
-                words = temp_action.split()
-                if len(words) > 1 and any(ws in words[-1].lower() for ws in ['-sentinel', 'compnet', 'namicoh', 'bquik', 'maps']):
-                    workspace = words[-1]
-                    temp_action = " ".join(words[:-1]).strip()
-                
-                if temp_action.upper() not in ["N/A", "N", "-", ""]:
-                    # Biarkan format angka seperti 404,200 tidak berubah
-                    action = temp_action.capitalize() if temp_action.isalpha() and temp_action.islower() else temp_action
-                        
-                # --- 4. FALLBACK WORKSPACE ---
-                if workspace == "N/A" and i + 1 < len(lines):
-                    next_line = lines[i+1]
-                    if not ('/' in next_line and len(next_line.split('/')) >= 3):
-                        workspace = next_line.split()[0]
-                
-                if alert_name != "N/A":
-                    summaries.append({
-                        "incident_id": incident_id,
-                        "workspace": workspace,
-                        "alert_name": alert_name,
-                        "action": action,
-                        "status": status
-                    })
+            lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+            summaries = []
             
-            # --- 5. UPDATE FLAG STATUS ---
-            if summaries:
-                if "TruePositive" in line:
-                    summaries[-1]["status"] = "Incident"
-                elif "BenignPositive" in line:
-                    summaries[-1]["status"] = "Attempt"
+            for i, line in enumerate(lines):
+                if '/' in line and len(line.split('/')) >= 3:
+                    parts = line.split('/')
                     
-        return summaries
+                    # --- 0. REPAIR N/A SPLIT ---
+                    # Menambal insiden di mana 'N/A' tidak sengaja terbelah menjadi 'N' dan 'A'
+                    if len(parts) >= 2 and parts[-2].strip() == 'N' and parts[-1].strip().startswith('A'):
+                        parts[-2] = "N/A" + parts[-1][1:]
+                        parts.pop() # Buang sisa pecahan
+                        
+                    incident_id = "N/A"
+                    alert_name = "N/A"
+                    action = "Blocked"  
+                    workspace = "N/A"
+                    status = "Attempt"
+                    
+                    # --- 1. EKSTRAK INCIDENT ID (Metode Pola Absolut) ---
+                    # Langsung menargetkan pola (Teks) - (3 hingga 5 Angka)
+                    id_match = re.search(r'([A-Za-z0-9]+)-(\d{3,5})', parts[0])
+                    if id_match:
+                        incident_id = f"{id_match.group(1)}-{id_match.group(2)}"
+                    else:
+                        incident_id = parts[0][:15].strip()
+                            
+                    # --- 2. EKSTRAK ALERT NAME (Mencari Batas Severity) ---
+                    severity_levels = ["Low", "Medium", "High", "Critical", "Informational", "-"]
+                    sev_index = -1
+                    
+                    for j in range(len(parts)-1, 1, -1):
+                        if parts[j].strip() in severity_levels:
+                            sev_index = j
+                            break
+                    
+                    if sev_index != -1:
+                        alert_name = "/".join(parts[2:sev_index]).strip()
+                    else:
+                        alert_name = "/".join(parts[2:-2]).strip() if len(parts) >= 5 else parts[2].strip()
+                        
+                    alert_name = re.sub(r'[\[\]\"\\]', '', alert_name).strip()
+                    if alert_name == "-":
+                        alert_name = "Unknown / No Alert Name"
+                        
+                    # --- 3. EKSTRAK ACTION & WORKSPACE ---
+                    raw_action = parts[-1].strip()
+                    temp_action = re.sub(r'[\[\]\"\\]', '', raw_action).strip()
+                    
+                    words = temp_action.split()
+                    if len(words) > 1 and any(ws in words[-1].lower() for ws in ['-sentinel', 'compnet', 'namicoh', 'bquik', 'maps']):
+                        workspace = words[-1]
+                        temp_action = " ".join(words[:-1]).strip()
+                    
+                    if temp_action.upper() not in ["N/A", "N", "-", ""]:
+                        action = temp_action.capitalize() if temp_action.isalpha() and temp_action.islower() else temp_action
+                            
+                    # --- 4. FALLBACK WORKSPACE ---
+                    if workspace == "N/A" and i + 1 < len(lines):
+                        next_line = lines[i+1]
+                        if not ('/' in next_line and len(next_line.split('/')) >= 3):
+                            workspace = next_line.split()[0]
+                    
+                    if alert_name != "N/A":
+                        summaries.append({
+                            "incident_id": incident_id,
+                            "workspace": workspace,
+                            "alert_name": alert_name,
+                            "action": action,
+                            "status": status
+                        })
+                
+                # --- 5. UPDATE FLAG STATUS ---
+                if summaries:
+                    if "TruePositive" in line:
+                        summaries[-1]["status"] = "Incident"
+                    elif "BenignPositive" in line:
+                        summaries[-1]["status"] = "Attempt"
+                        
+            return summaries
 
     if st.button("Generate Shift Summary", type="primary"):
         if raw_shift_input.strip():
