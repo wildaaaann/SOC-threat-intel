@@ -652,12 +652,12 @@ with tab4:
 # ==========================================
 with tab6:
     st.subheader("📋 Shift Handover Summarizer")
-    st.markdown("Otomatis mengekstrak dan merangkum raw log tiket shift menjadi format template standar.")
+    st.markdown("Otomatis mengekstrak raw log tiket shift menjadi format template End of Shift Report.")
     
     raw_shift_input = st.text_area(
         "Masukkan Raw Data (Copy-paste):", 
         height=300,
-        placeholder="250253-7783250253/Fortigate/...\nbquik-sentinel\n..."
+        placeholder="250666-2722250666/ApplicationGateway/...\n..."
     )
     
     def parse_shift_logs(raw_text):
@@ -665,7 +665,7 @@ with tab6:
         summaries = []
         
         for i, line in enumerate(lines):
-            # 1. Deteksi Baris Tiket Baru
+            # 1. Deteksi Baris Tiket Baru (Mengandung minimal 3 garis miring)
             if '/' in line and len(line.split('/')) >= 3:
                 parts = line.split('/')
                 
@@ -673,9 +673,10 @@ with tab6:
                 alert_name = "N/A"
                 action = "Blocked"  
                 workspace = "N/A"
-                status = "Attempt" # Default kategori jika tidak ada keterangan
+                status = "Attempt" # Default
+                ticket_state = "Closed" # Default akan diperbarui nanti
                 
-                # Ekstrak Incident ID (Ambil UTUH beserta strip)
+                # --- EKSTRAK INCIDENT ID (Utuh beserta strip) ---
                 if len(parts) > 0:
                     raw_first_part = parts[0].strip()
                     match = re.match(r'^(.+?)(2[56][A-Za-z0-9]{4,6})$', raw_first_part)
@@ -686,13 +687,21 @@ with tab6:
                         fallback_match = re.search(r'^([A-Za-z0-9]+-\d+)', raw_first_part)
                         incident_id = fallback_match.group(1).strip() if fallback_match else raw_first_part[:15].strip()
                         
-                # Ekstrak Alert Name
-                if len(parts) >= 3:
-                    alert_name = re.sub(r'[\[\]\"\\]', '', parts[2]).strip()
-                    if alert_name == "-":
-                        alert_name = "Unknown / No Alert Name"
+                # --- EKSTRAK ALERT NAME (Smart Join Anti-Potong) ---
+                # Sistem akan mencari level severity (Low/Medium/High) dari belakang
+                severity_levels = ["Low", "Medium", "High", "Critical", "Informational", "-"]
+                
+                # Jika formatnya baku, gabungkan kembali nama alert yang memiliki '/' di dalamnya
+                if len(parts) >= 6 and parts[-3].strip() in severity_levels:
+                    alert_name = "/".join(parts[2:-3]).strip()
+                elif len(parts) >= 3:
+                    alert_name = parts[2].strip()
                     
-                # Ekstrak Action 
+                alert_name = re.sub(r'[\[\]\"\\]', '', alert_name).strip()
+                if alert_name == "-":
+                    alert_name = "Unknown / No Alert Name"
+                    
+                # --- EKSTRAK ACTION ---
                 if len(parts) >= 4:
                     raw_action = parts[-1].strip()
                     temp_action = ""
@@ -708,7 +717,8 @@ with tab6:
                     else:
                         if ' ' in raw_action:
                             words = raw_action.split()
-                            if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1]:
+                            # Menambahkan 'maps' ke pengenalan workspace
+                            if "-sentinel" in words[-1] or "compnet" in words[-1] or "namicoh" in words[-1] or "bquik" in words[-1] or "maps" in words[-1]:
                                 workspace = words[-1]
                                 temp_action = " ".join(words[:-1]).strip()
                             else:
@@ -719,32 +729,38 @@ with tab6:
                     if temp_action and temp_action.upper() not in ["N/A", "N", "-", ""]:
                         action = temp_action.capitalize() if temp_action.islower() else temp_action
                         
-                # Fallback Workspace
+                # --- FALLBACK WORKSPACE ---
                 if workspace == "N/A" and i + 1 < len(lines):
                     next_line = lines[i+1]
                     if not ('/' in next_line and len(next_line.split('/')) >= 3):
                         workspace = next_line.split()[0]
                 
+                # Simpan Data Sementara
                 if alert_name != "N/A":
                     summaries.append({
                         "incident_id": incident_id,
                         "workspace": workspace,
                         "alert_name": alert_name,
                         "action": action,
-                        "status": status
+                        "status": status,
+                        "ticket_state": ticket_state
                     })
             
-            # 2. Update Kategori Berdasarkan Flag (TruePositive / BenignPositive)
-            elif "TruePositive" in line or "BenignPositive" in line:
-                if summaries:  # Pastikan sudah ada tiket yang tersimpan sebelumnya
-                    if "TruePositive" in line:
-                        summaries[-1]["status"] = "Incident"
-                    elif "BenignPositive" in line:
-                        summaries[-1]["status"] = "Attempt"
+            # 2. Update Status & State berdasarkan flag di baris mana pun
+            if summaries:
+                if "INCIDENT OPEN" in line:
+                    summaries[-1]["ticket_state"] = "Open"
+                elif "INCIDENT CLOSED" in line:
+                    summaries[-1]["ticket_state"] = "Closed"
+                    
+                if "TruePositive" in line:
+                    summaries[-1]["status"] = "Incident"
+                elif "BenignPositive" in line:
+                    summaries[-1]["status"] = "Attempt"
                     
         return summaries
 
-    # --- PASTIKAN TOMBOL INI SEJAJAR DENGAN 'def parse_shift_logs' ---
+    # --- TOMBOL GENERATE ---
     if st.button("Generate Shift Summary", type="primary"):
         if raw_shift_input.strip():
             with st.spinner("Merangkum data shift ke dalam template..."):
@@ -757,7 +773,23 @@ with tab6:
                     incidents = [s for s in parsed_data if s["status"] == "Incident"]
                     attempts = [s for s in parsed_data if s["status"] == "Attempt"]
                     
-                    output_text = ""
+                    # Menghitung Otomatis Tiket Aktif & Closed
+                    active_count = sum(1 for s in parsed_data if s["ticket_state"] == "Open")
+                    closed_count = sum(1 for s in parsed_data if s["ticket_state"] == "Closed")
+                    
+                    # --- MENYUSUN HEADER END OF SHIFT REPORT ---
+                    output_text = "End of Shift Report\n\n"
+                    output_text += "✅ Analyst: M. Wildan\n"
+                    output_text += "✅ Shift: 07:30-19:30 / 19:30-07:30 / 20:00-08:00\n"
+                    output_text += "✅ Incident Summary:\n"
+                    output_text += f"    ✅ Active: {active_count}\n"
+                    output_text += f"    ✅ Closed: {closed_count}\n"
+                    output_text += f"    ✅ Attempts: {len(attempts)}\n"
+                    output_text += f"    ✅ Incidents: {len(incidents)}\n"
+                    output_text += "    ✅ Escalated: 0\n"
+                    output_text += "    ✅ Change Requests: 0\n\n"
+                    
+                    output_text += "==============================================\n\n"
                     
                     # 1. Cetak Blok Incidents (TruePositive)
                     if incidents:
@@ -769,7 +801,6 @@ with tab6:
                             output_text += f"Critical Assets: No\n"
                             output_text += f"Device Action: {item['action']}\n"
                             
-                            # Beri spasi bawah jika ini bukan tiket terakhir, atau jika masih ada blok Attempts di bawahnya
                             if idx < len(incidents) - 1 or attempts:
                                 output_text += "\n"
                     
@@ -786,7 +817,7 @@ with tab6:
                             if idx < len(attempts) - 1:
                                 output_text += "\n"
                     
-                    st.success(f"Berhasil merangkum {len(incidents)} Incidents dan {len(attempts)} Attempts!")
+                    st.success(f"Berhasil menyusun Laporan End of Shift!")
                     st.text_area(
                         "📋 Plaintext Handover Output (Siap Copy-Paste):", 
                         value=output_text, 
@@ -796,7 +827,7 @@ with tab6:
                     st.download_button(
                         label="⬇️ Download Rangkuman (.txt)",
                         data=output_text,
-                        file_name=f"Shift_Handover_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        file_name=f"End_Of_Shift_Wildan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                         mime="text/plain"
                     )
         else:
