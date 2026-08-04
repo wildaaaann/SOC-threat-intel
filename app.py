@@ -777,7 +777,7 @@ with tab6:
                     output_text += "    ✅ Escalated: 0\n"
                     output_text += "    ✅ Change Requests: 0\n\n"
                     
-                    output_text += "==============================================\n\n"
+                    output_text += "======================================\n\n"
                     
                     if incidents:
                         output_text += "Incidents :\n\n"
