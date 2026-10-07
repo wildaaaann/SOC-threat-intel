@@ -1,9 +1,3 @@
-# Tema "Agent AI" (hitam hangat + oranye) untuk SOC Threat Intel Dashboard.
-# Warna diambil dari template fc79ed15-agent-ai.html:
-#   dark : --bg #080808, --ink #f2efea, --line #242322, --faint #151413, --orange #ff6a1a, --amber #ffb168
-#   light: turunan kertas hangat dari palet yang sama (aksen oranye digelapkan agar kontras teks aman)
-# Light/Dark bisa dipilih dari menu Settings (pojok kanan atas) atau otomatis mengikuti sistem.
-
 [theme]
 font = "Arial, Helvetica, sans-serif"
 headingFont = "Arial, Helvetica, sans-serif"
