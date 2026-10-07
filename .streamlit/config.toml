@@ -1,0 +1,44 @@
+# Tema "Agent AI" (hitam hangat + oranye) untuk SOC Threat Intel Dashboard.
+# Warna diambil dari template fc79ed15-agent-ai.html:
+#   dark : --bg #080808, --ink #f2efea, --line #242322, --faint #151413, --orange #ff6a1a, --amber #ffb168
+#   light: turunan kertas hangat dari palet yang sama (aksen oranye digelapkan agar kontras teks aman)
+# Light/Dark bisa dipilih dari menu Settings (pojok kanan atas) atau otomatis mengikuti sistem.
+
+[theme]
+font = "Arial, Helvetica, sans-serif"
+headingFont = "Arial, Helvetica, sans-serif"
+codeFont = "Courier New, monospace"
+headingFontWeights = [700, 700, 700, 700, 700, 700]
+baseRadius = "2px"
+buttonRadius = "2px"
+showWidgetBorder = true
+
+[theme.dark]
+primaryColor = "#ff6a1a"
+backgroundColor = "#080808"
+secondaryBackgroundColor = "#151413"
+textColor = "#f2efea"
+linkColor = "#ffb168"
+codeBackgroundColor = "#0d0c0b"
+borderColor = "#35302c"
+orangeColor = "#ff6a1a"
+yellowColor = "#ffb168"
+
+[theme.dark.sidebar]
+backgroundColor = "#0d0c0b"
+secondaryBackgroundColor = "#151413"
+
+[theme.light]
+primaryColor = "#d94f06"
+backgroundColor = "#f6f2eb"
+secondaryBackgroundColor = "#ece6dc"
+textColor = "#17130f"
+linkColor = "#b8450a"
+codeBackgroundColor = "#ebe4d8"
+borderColor = "#d3c8b8"
+orangeColor = "#d94f06"
+yellowColor = "#b9791a"
+
+[theme.light.sidebar]
+backgroundColor = "#efe9df"
+secondaryBackgroundColor = "#e4dccf"
