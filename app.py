@@ -3,9 +3,10 @@ import re
 import requests
 import json
 import urllib3
-from datetime import datetime
+from datetime import datetime, timezone
 from google import genai 
 from google.genai import types
+from ioc_extract import extract_iocs, pick_primary, first_public_ip
 
 # --- MENCEGAH WARNING SSL MUNZUL DI TERMINAL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -70,6 +71,10 @@ def get_ioc_type(ioc):
     if '.' in ioc and not ' ' in ioc: return "domain"
     return "unknown"
 
+def tls_verify():
+    """Verifikasi sertifikat SSL aktif secara default. Hanya mati jika analis mematikannya di sidebar."""
+    return st.session_state.get("tls_verify", True)
+
 def query_virustotal(ioc, ioc_type, api_key):
     if not api_key: return '{"error": "VirusTotal API key not configured."}'
     if ioc_type == "ip": url = f"https://www.virustotal.com/api/v3/ip_addresses/{ioc}"
@@ -77,7 +82,7 @@ def query_virustotal(ioc, ioc_type, api_key):
     elif ioc_type == "domain": url = f"https://www.virustotal.com/api/v3/domains/{ioc}"
     else: return '{"error": "Unsupported IoC type."}'
     try:
-        response = requests.get(url, headers={"x-apikey": api_key}, timeout=15, verify=False)
+        response = requests.get(url, headers={"x-apikey": api_key}, timeout=15, verify=tls_verify())
         response.raise_for_status()
         return json.dumps(response.json().get("data", {}).get("attributes", {}), indent=2)
     except Exception as e: return f'{{"error": "{str(e)}"}}'
@@ -91,7 +96,7 @@ def query_virustotal_relationships(ioc, ioc_type, api_key):
     relationship_data = {}
     for endpoint in endpoints_map[ioc_key]:
         try:
-            response = requests.get(base_urls[ioc_key] + endpoint, headers={"x-apikey": api_key}, params={'limit': 10}, timeout=15, verify=False)
+            response = requests.get(base_urls[ioc_key] + endpoint, headers={"x-apikey": api_key}, params={'limit': 10}, timeout=15, verify=tls_verify())
             response.raise_for_status()
             relationship_data[endpoint] = response.json().get("data", [])
         except Exception as e: relationship_data[endpoint] = {"error": str(e)}
@@ -101,7 +106,7 @@ def query_abuseipdb(ip, api_key):
     if not ip: return ""
     if not api_key: return '{"error": "AbuseIPDB API key not configured."}'
     try:
-        response = requests.get("https://api.abuseipdb.com/api/v2/check", headers={"Accept": "application/json", "Key": api_key}, params={"ipAddress": ip, "maxAgeInDays": "90", "verbose": ""}, timeout=15, verify=False)
+        response = requests.get("https://api.abuseipdb.com/api/v2/check", headers={"Accept": "application/json", "Key": api_key}, params={"ipAddress": ip, "maxAgeInDays": "90", "verbose": ""}, timeout=15, verify=tls_verify())
         response.raise_for_status()
         return json.dumps(response.json().get("data", {}), indent=2)
     except Exception as e: return f'{{"error": "{str(e)}"}}'
@@ -109,7 +114,7 @@ def query_abuseipdb(ip, api_key):
 def query_tip_neiki(ioc, ioc_type):
     if ioc_type not in ["md5", "sha1", "sha256"]: return ""
     try:
-        response = requests.get(f"https://tip.neiki.dev/api/reports/file/{ioc}", timeout=30, verify=False)
+        response = requests.get(f"https://tip.neiki.dev/api/reports/file/{ioc}", timeout=30, verify=tls_verify())
         response.raise_for_status()
         return json.dumps(response.json(), indent=2)
     except Exception as e: return f'{{"error": "{str(e)}"}}'
@@ -120,7 +125,7 @@ def query_urlscan(ioc, ioc_type, api_key):
     try:
         headers = {'API-Key': api_key, 'Content-Type': 'application/json'}
         query_val = f"domain:{ioc}" if ioc_type == "domain" else f"ip:{ioc}"
-        response = requests.get(f"https://urlscan.io/api/v1/search/?q={query_val}", headers=headers, timeout=15, verify=False)
+        response = requests.get(f"https://urlscan.io/api/v1/search/?q={query_val}", headers=headers, timeout=15, verify=tls_verify())
         response.raise_for_status()
         results = response.json().get('results', [])
         if results:
@@ -140,7 +145,7 @@ def query_hybridanalysis(ioc, ioc_type, api_key):
             'User-Agent': 'Falcon Sandbox',
             'Content-Type': 'application/x-www-form-urlencoded'
         }
-        response = requests.post("https://hybrid-analysis.com/api/v2/search/hash", headers=headers, data={'hash': ioc}, timeout=15, verify=False)
+        response = requests.post("https://hybrid-analysis.com/api/v2/search/hash", headers=headers, data={'hash': ioc}, timeout=15, verify=tls_verify())
         response.raise_for_status()
         results = response.json()
         if results and isinstance(results, list) and len(results) > 0:
@@ -175,7 +180,69 @@ def generate_initial_verdict(ioc_type, vt_data_str, abuse_data_str):
     if not reasons: return "Likely Benign (No negative indicators found)"
     return f"{verdict} ({'; '.join(reasons)})"
 
-def generate_prompt(alert_name, ioc, ioc_type, action, collated_data, initial_verdict, first_seen, last_seen, final_verdict_decision):
+def parse_ai_verdict(report_text):
+    """Baca verdict AI dari baris Conclusion. Mengembalikan 'Tidak terbaca' jika formatnya tidak ditemukan."""
+    match = re.search(r"Conclusion:\s*[\"'\[]?\s*(True Positive|False Positive|Likely Benign)", report_text or "", re.IGNORECASE)
+    if not match:
+        return "Tidak terbaca"
+    return {"true positive": "True Positive", "false positive": "False Positive", "likely benign": "Likely Benign"}[match.group(1).lower()]
+
+def summarize_cti(source, result):
+    """Ringkas hasil satu sumber CTI menjadi (status, temuan utama)."""
+    if not result:
+        return "Dilewati", "Tidak berlaku untuk tipe IoC ini"
+    if isinstance(result, dict):  # relationships VirusTotal
+        errors = [f"{k}: {v['error']}" for k, v in result.items() if isinstance(v, dict) and "error" in v]
+        counts = ", ".join(f"{k}: {len(v)}" for k, v in result.items() if isinstance(v, list))
+        if errors and not counts:
+            return "Gagal", "; ".join(errors)[:140]
+        return "OK", counts or "Tidak ada relasi"
+    try:
+        data = json.loads(result)
+    except Exception:
+        return "Gagal", "Respons bukan JSON"
+    if "error" in data:
+        return "Gagal", str(data["error"])[:140]
+    if list(data.keys()) == ["message"]:
+        return "Tidak ada data", str(data["message"])
+    if source == "VirusTotal":
+        stats = data.get("last_analysis_stats", {})
+        return "OK", f"malicious {stats.get('malicious', 0)} dari {sum(stats.values()) or '?'} engine"
+    if source == "AbuseIPDB":
+        return "OK", f"confidence {data.get('abuseConfidenceScore', '?')}%, laporan {data.get('totalReports', '?')}"
+    if source == "URLScan":
+        overall = data.get("verdicts", {}).get("overall", {})
+        return "OK", f"verdict overall malicious={overall.get('malicious', '?')}, score={overall.get('score', '?')}"
+    if source == "HybridAnalysis":
+        return "OK", f"verdict {data.get('verdict', '?')}, threat_score {data.get('threat_score', '?')}"
+    return "OK", "Data diterima"
+
+def run_cti(log, source, queried, applicable, fn, *args):
+    """Jalankan satu query CTI dan catat sumber, nilai yang di-query, waktu UTC, status, dan temuan utama."""
+    if not applicable:
+        log.append({"Sumber": source, "Query": queried, "Waktu (UTC)": "n/a", "Status": "Dilewati", "Temuan": "Tidak berlaku untuk tipe IoC ini"})
+        return ""
+    result = fn(*args)
+    status, finding = summarize_cti(source, result)
+    log.append({
+        "Sumber": source,
+        "Query": queried,
+        "Waktu (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "Status": status,
+        "Temuan": finding,
+    })
+    return result
+
+def generate_prompt(alert_name, ioc, ioc_type, action, collated_data, initial_verdict, first_seen, last_seen, final_verdict_decision=None):
+    # final_verdict_decision=None berarti mode Blind: status analis tidak boleh sampai ke AI.
+    if final_verdict_decision:
+        verdict_instruction = f"It is a {final_verdict_decision}, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website."
+    else:
+        verdict_instruction = (
+            "No analyst verdict is provided. Decide the verdict yourself, using only the data above: True Positive, False Positive, or Likely Benign. "
+            "Start the Conclusion line in section 3 with exactly that verdict followed by a period, for example 'Conclusion: False Positive. ...'. "
+            "Then make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website."
+        )
     return f"""{SOC_ANALYST_ROLE}
 
 --- START OF DATA ---
@@ -191,7 +258,7 @@ Threat Intelligence Data (JSON):
 --- END OF DATA ---
 
 Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. 
-It is a {final_verdict_decision}, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website.
+{verdict_instruction}
 """
 
 # --- INISIALISASI SESSION STATE UNTUK HISTORY ---
@@ -233,6 +300,15 @@ abuse_key = st.sidebar.text_input("AbuseIPDB API Key (Wajib)", type="password", 
 st.sidebar.markdown("---")
 urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password", value=ENV_URLSCAN)
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
+st.sidebar.markdown("---")
+st.sidebar.checkbox(
+    "Verifikasi sertifikat SSL (disarankan)",
+    value=True,
+    key="tls_verify",
+    help="Matikan hanya jika jaringan Anda memakai SSL inspection dan CA perusahaan belum dipasang. Pilihan ini dicatat di setiap riwayat analisis.",
+)
+if not st.session_state.get("tls_verify", True):
+    st.sidebar.warning("Verifikasi SSL mati: request ke VirusTotal, AbuseIPDB, URLScan, HybridAnalysis, TIP Neiki, dan Gemini tidak memeriksa sertifikat server.")
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["New Analysis", "History", "Defang", "Converter", "Shift Summarizer"])
@@ -240,50 +316,71 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["New Analysis", "History", "Defang", "Co
 # ==========================================
 # TAB 1: NEW ANALYSIS
 # ==========================================
+MODE_BLIND = "Blind: AI menilai sendiri (untuk pengujian)"
+MODE_ASSISTED = "Dibantu: status analis dikirim ke AI"
+
 with tab1:
     with st.form("ioc_form"):
         col1, col2 = st.columns(2)
         with col1:
             alert_name = st.text_input("Alert Name:", placeholder="e.g., FGT utm:webfilter blocked")
-            ioc = st.text_input("Primary IoC:", placeholder="IP, Domain, MD5, SHA1, atau SHA256")
-            final_verdict_decision = st.selectbox("Status Alert (Untuk instruksi AI):", ["True Positive", "False Positive", "Likely Benign"])
+            ioc = st.text_input("Primary IoC (kosong = ambil dari Raw Alert):", placeholder="IP, Domain, MD5, SHA1, atau SHA256")
+            final_verdict_decision = st.selectbox("Status Alert (keputusan analis / ground truth):", ["Belum ditentukan", "True Positive", "False Positive", "Likely Benign"])
         with col2:
             action = st.text_input("Action Taken (Opsional):", placeholder="e.g., Blocked")
             abuse_ip = st.text_input("Related IP untuk AbuseIPDB (Opsional):", placeholder="Masukkan IP jika IoC utama adalah Domain/Hash")
-        
+        raw_alert = st.text_area(
+            "Raw Alert / Log (Opsional, IoC diekstrak otomatis):",
+            height=120,
+            placeholder="Tempel isi alert. IP, domain, URL, dan hash dikenali otomatis, termasuk yang di-defang (evil[.]com, hxxp).",
+        )
+        analysis_mode = st.radio(
+            "Mode analisis:",
+            [MODE_BLIND, MODE_ASSISTED],
+            horizontal=True,
+            help="Blind: status analis tidak dikirim ke AI dan hanya dipakai sebagai pembanding setelah AI menjawab. Dibantu: status ikut dikirim ke AI, sehingga hasilnya tidak valid untuk mengukur ketepatan penilaian AI.",
+        )
+
         submit_button = st.form_submit_button("Mulai Analisis & Generate Laporan")
 
     if submit_button:
+        extracted_iocs = extract_iocs(raw_alert)
+        ioc = ioc.strip() or (pick_primary(extracted_iocs) or "")
+        analyst_status = None if final_verdict_decision == "Belum ditentukan" else final_verdict_decision
+
         if not alert_name or not ioc:
-            st.error("Alert Name dan Primary IoC wajib diisi!")
+            st.error("Alert Name dan Primary IoC wajib diisi (atau tempel Raw Alert yang berisi IoC publik)!")
+        elif analysis_mode == MODE_ASSISTED and analyst_status is None:
+            st.error("Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind.")
         elif not vt_key or not abuse_key or not gemini_key:
             st.error("Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
         else:
-            ioc = ioc.strip()
             ioc_type = get_ioc_type(ioc)
-            
+
             if ioc_type == "unknown":
                 st.error(f"Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar.")
             else:
                 with st.spinner(f"1/2: Mengambil data intel untuk {ioc_type.upper()} {defang_ioc(ioc, ioc_type)}..."):
-                    target_ip_for_abuse = ioc if ioc_type == 'ip' else abuse_ip.strip()
+                    target_ip_for_abuse = ioc if ioc_type == 'ip' else (abuse_ip.strip() or first_public_ip(extracted_iocs) or "")
+                    is_hash = ioc_type in ["md5", "sha1", "sha256"]
+                    cti_log = []
 
-                    vt_results = query_virustotal(ioc, ioc_type, vt_key)
-                    vt_rel_results = query_virustotal_relationships(ioc, ioc_type, vt_key)
-                    abuse_results = query_abuseipdb(target_ip_for_abuse, abuse_key) if target_ip_for_abuse else ""
-                    urlscan_results = query_urlscan(ioc, ioc_type, urlscan_key) if ioc_type in ['domain', 'ip'] else ""
-                    hybrid_results = query_hybridanalysis(ioc, ioc_type, hybrid_key) if ioc_type in ["md5", "sha1", "sha256"] else ""
-                    tip_results = query_tip_neiki(ioc, ioc_type) if ioc_type in ["md5", "sha1", "sha256"] else ""
-                    
+                    vt_results = run_cti(cti_log, "VirusTotal", ioc, True, query_virustotal, ioc, ioc_type, vt_key)
+                    vt_rel_results = run_cti(cti_log, "VirusTotal (relationships)", ioc, True, query_virustotal_relationships, ioc, ioc_type, vt_key)
+                    abuse_results = run_cti(cti_log, "AbuseIPDB", target_ip_for_abuse or "n/a", bool(target_ip_for_abuse), query_abuseipdb, target_ip_for_abuse, abuse_key)
+                    urlscan_results = run_cti(cti_log, "URLScan", ioc, ioc_type in ['domain', 'ip'], query_urlscan, ioc, ioc_type, urlscan_key)
+                    hybrid_results = run_cti(cti_log, "HybridAnalysis", ioc, is_hash, query_hybridanalysis, ioc, ioc_type, hybrid_key)
+                    tip_results = run_cti(cti_log, "TIP Neiki", ioc, is_hash, query_tip_neiki, ioc, ioc_type)
+
                     first_seen, last_seen = "N/A", "N/A"
                     try:
                         vt_dict = json.loads(vt_results)
-                        if vt_dict.get('last_analysis_date'): 
+                        if vt_dict.get('last_analysis_date'):
                             last_seen = datetime.fromtimestamp(vt_dict['last_analysis_date']).strftime('%Y-%m-%d %H:%M:%S UTC')
                     except: pass
 
                     verdict = generate_initial_verdict(ioc_type, vt_results, abuse_results)
-                    
+
                     collated = f"VirusTotal Data:\n{vt_results}\n"
                     if vt_rel_results: collated += f"\nVirusTotal Relationships:\n{json.dumps(vt_rel_results, indent=2)}\n"
                     if abuse_results: collated += f"\nAbuseIPDB Data:\n{abuse_results}\n"
@@ -291,20 +388,32 @@ with tab1:
                     if hybrid_results: collated += f"\nHybridAnalysis Data:\n{hybrid_results}\n"
                     if tip_results: collated += f"\nTIP Neiki Data:\n{tip_results}\n"
 
-                    final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, final_verdict_decision)
+                    # Hanya IoC hasil ekstraksi yang ikut ke prompt. Teks Raw Alert tidak dikirim ke AI.
+                    other_iocs = [i for i in extracted_iocs if i["value"] != ioc]
+                    if other_iocs:
+                        collated += "\nOther IoCs extracted from the alert (not enriched):\n"
+                        collated += "\n".join(f"- {i['type']}: {i['value']}" + ("" if i["public"] else " (private/non-routable)") for i in other_iocs) + "\n"
+                    collated += "\nCTI Retrieval Log (UTC):\n"
+                    collated += "\n".join(f"- {r['Sumber']} | query: {r['Query']} | {r['Waktu (UTC)']} | {r['Status']}: {r['Temuan']}" for r in cti_log) + "\n"
+
+                    # Mode Blind: status analis tidak dikirim ke AI (None).
+                    prompt_status = final_verdict_decision if analysis_mode == MODE_ASSISTED else None
+                    final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, prompt_status)
 
                 with st.spinner("2/2: Menghasilkan Laporan Akhir dengan Gemini AI..."):
                     try:
-                        # JURUS BYPASS SSL TINGKAT LANJUT
-                        import ssl
-                        custom_ssl_context = ssl.create_default_context()
-                        custom_ssl_context.check_hostname = False
-                        custom_ssl_context.verify_mode = ssl.CERT_NONE
-                        
-                        client = genai.Client(
-                            api_key=gemini_key,
-                            http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
-                        )
+                        if tls_verify():
+                            client = genai.Client(api_key=gemini_key)
+                        else:
+                            # Verifikasi SSL dimatikan analis lewat sidebar; pilihan ini dicatat di history.
+                            import ssl
+                            custom_ssl_context = ssl.create_default_context()
+                            custom_ssl_context.check_hostname = False
+                            custom_ssl_context.verify_mode = ssl.CERT_NONE
+                            client = genai.Client(
+                                api_key=gemini_key,
+                                http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
+                            )
                         response = client.models.generate_content(
                             model='gemini-2.5-flash',
                             contents=final_prompt,
@@ -313,8 +422,20 @@ with tab1:
                     except Exception as e:
                         final_report_text = f"Terjadi kesalahan saat menghubungi API Gemini: {str(e)}"
 
+                # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
+                is_blind = analysis_mode == MODE_BLIND
+                ai_verdict = parse_ai_verdict(final_report_text) if is_blind else "-"
+                if not is_blind:
+                    match_label = "Tidak dinilai (mode Dibantu)"
+                elif analyst_status is None:
+                    match_label = "Tidak ada pembanding"
+                elif ai_verdict == "Tidak terbaca":
+                    match_label = "Verdict AI tidak terbaca"
+                else:
+                    match_label = "Cocok" if ai_verdict == analyst_status else "Tidak cocok"
+
                 st.success(f"Analisis Selesai!")
-                
+
                 # --- SIMPAN KE HISTORY ---
                 # Menggunakan .insert(0, ...) agar riwayat terbaru selalu muncul paling atas
                 st.session_state.history.insert(0, {
@@ -323,13 +444,49 @@ with tab1:
                     "alert_name": alert_name,
                     "status": final_verdict_decision,
                     "report": final_report_text,
-                    "raw_prompt": final_prompt
+                    "raw_prompt": final_prompt,
+                    "mode": analysis_mode,
+                    "ai_verdict": ai_verdict,
+                    "match_label": match_label,
+                    "tls_verify": tls_verify(),
+                    "cti_log": cti_log,
                 })
+
+                # Sumber CTI dan waktu pengambilan selalu terlihat oleh analis
+                st.subheader("Sumber CTI & Waktu Pengambilan")
+                st.table(cti_log)
+
+                cert_failed = any(
+                    "certificate_verify_failed" in str(r).lower()
+                    for r in (vt_results, vt_rel_results, abuse_results, urlscan_results, hybrid_results, tip_results, final_report_text)
+                )
+                if cert_failed:
+                    st.warning("Verifikasi sertifikat SSL gagal. Jika jaringan Anda memakai SSL inspection, arahkan REQUESTS_CA_BUNDLE dan SSL_CERT_FILE ke CA perusahaan, atau matikan 'Verifikasi sertifikat SSL' di sidebar (pilihan ini dicatat di riwayat).")
+
+                if extracted_iocs:
+                    st.subheader("IoC Hasil Ekstraksi")
+                    st.table([{
+                        "IoC": i["value"],
+                        "Tipe": i["type"],
+                        "Publik": "ya" if i["public"] else "tidak (tidak diperkaya)",
+                        "Peran": "Primary" if i["value"] == ioc else ("Related IP" if i["value"] == target_ip_for_abuse else "Konteks"),
+                    } for i in extracted_iocs])
+
+                if is_blind:
+                    verdict_summary = f"Verdict AI: {ai_verdict} | Status analis: {analyst_status or 'Belum ditentukan'} | {match_label}"
+                    if match_label == "Cocok":
+                        st.success(verdict_summary)
+                    elif match_label == "Tidak cocok":
+                        st.warning(verdict_summary)
+                    else:
+                        st.info(verdict_summary)
+                else:
+                    st.info("Mode Dibantu: status analis ikut dikirim ke AI, jadi hasil ini tidak boleh dipakai untuk mengukur ketepatan penilaian AI.")
 
                 # Menampilkan Laporan Akhir
                 st.subheader("Final Report :")
                 st.text_area("Copy atau edit teks di bawah ini:", value=final_report_text, height=400)
-                
+
                 # --- Tombol Download Prompt Mentah (Fallback) ---
                 filename = f"prompt_{ioc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 st.download_button(
@@ -340,7 +497,7 @@ with tab1:
                 )
                 st.markdown("Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict. It is a true positive, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website")
                 st.markdown("<br>", unsafe_allow_html=True)
-            
+
                 # Tampilkan Data Mentah
                 with st.expander("See Raw JSON Data"):
                     st.code(collated, language='json')
@@ -365,8 +522,11 @@ with tab2:
         
         # Menampilkan setiap riwayat dalam bentuk expander (bisa di-klik untuk buka/tutup)
         for item in st.session_state.history:
-            with st.expander(f"[{item['timestamp']}] {item['ioc']} - {item['status']}"):
+            with st.expander(f"[{item['timestamp']}] {item['ioc']} - {item['status']} | AI: {item.get('ai_verdict', '-')}"):
                 st.write(f"**Alert Name:** {item['alert_name']}")
+                st.write(f"**Mode:** {item.get('mode', '-')} | **Pembanding:** {item.get('match_label', '-')} | **Verifikasi SSL:** {'aktif' if item.get('tls_verify', True) else 'mati'}")
+                if item.get('cti_log'):
+                    st.table(item['cti_log'])
                 st.text_area(
                     "Final Report", 
                     value=item['report'], 
