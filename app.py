@@ -201,6 +201,10 @@ if "history" not in st.session_state:
 # --- UI STREAMLIT ---
 st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", layout="wide")
 
+# --- TEMA (hanya tampilan, lihat theme.py dan .streamlit/config.toml) ---
+from theme import apply_theme
+apply_theme()
+
 st.title("🛡️ SOC Threat Inteligence Dashboard")
 st.markdown("Automation gathering threat Inteligence and report @wildaaan.")
 
