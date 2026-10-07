@@ -225,7 +225,7 @@ except:
     pass # Jika secrets.toml tidak ada di lokal, biarkan kosong
 
 # --- SIDEBAR KONFIGURASI API ---
-st.sidebar.header("🔑 Konfigurasi API")
+st.sidebar.header("Konfigurasi API")
 gemini_key = st.sidebar.text_input("Gemini API Key (Wajib)", type="password", value=ENV_GEMINI)
 st.sidebar.markdown("---")
 vt_key = st.sidebar.text_input("VirusTotal API Key (Wajib)", type="password", value=ENV_VT)
@@ -235,7 +235,7 @@ urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password
 hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
 
 # --- MEMBAGI UI MENJADI 3 TAB ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 New Analysis", "🕒 History", "⚙️ Defang", "📝 Bulk Parser", "📄 Converter", "📋 Shift Summarizer"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["New Analysis", "History", "Defang", "Converter", "Shift Summarizer"])
 
 # ==========================================
 # TAB 1: NEW ANALYSIS
@@ -255,15 +255,15 @@ with tab1:
 
     if submit_button:
         if not alert_name or not ioc:
-            st.error("⚠️ Alert Name dan Primary IoC wajib diisi!")
+            st.error("Alert Name dan Primary IoC wajib diisi!")
         elif not vt_key or not abuse_key or not gemini_key:
-            st.error("⚠️ Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
+            st.error("Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
         else:
             ioc = ioc.strip()
             ioc_type = get_ioc_type(ioc)
             
             if ioc_type == "unknown":
-                st.error(f"⚠️ Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar.")
+                st.error(f"Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar.")
             else:
                 with st.spinner(f"1/2: Mengambil data intel untuk {ioc_type.upper()} {defang_ioc(ioc, ioc_type)}..."):
                     target_ip_for_abuse = ioc if ioc_type == 'ip' else abuse_ip.strip()
@@ -327,13 +327,13 @@ with tab1:
                 })
 
                 # Menampilkan Laporan Akhir
-                st.subheader("📝 Final Report :")
+                st.subheader("Final Report :")
                 st.text_area("Copy atau edit teks di bawah ini:", value=final_report_text, height=400)
                 
                 # --- Tombol Download Prompt Mentah (Fallback) ---
                 filename = f"prompt_{ioc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 st.download_button(
-                    label=f"⬇️ Download Exported File: {filename}",
+                    label=f"Download Exported File: {filename}",
                     data=final_prompt,
                     file_name=filename,
                     mime="text/plain"
@@ -350,14 +350,14 @@ with tab1:
 # TAB 2: HISTORY (RIWAYAT ANALISIS)
 # ==========================================
 with tab2:
-    st.subheader("🕒 Riwayat Analisis")
+    st.subheader("Riwayat Analisis")
     st.markdown("Data riwayat di bawah ini disimpan sementara dan akan hilang jika Anda refresh halaman.")
     
     if len(st.session_state.history) == 0:
         st.info("Belum ada riwayat analisis.")
     else:
         # Tombol untuk menghapus riwayat
-        if st.button("🗑️ Hapus Semua Riwayat"):
+        if st.button("Hapus Semua Riwayat"):
             st.session_state.history = []
             st.rerun() # Refresh halaman agar riwayat bersih
             
@@ -375,7 +375,7 @@ with tab2:
                 )
                 
                 st.download_button(
-                    label="⬇️ Download Prompt Text",
+                    label="Download Prompt Text",
                     data=item['raw_prompt'],
                     file_name=f"history_prompt_{item['ioc'].replace('.', '_')}.txt",
                     mime="text/plain",
@@ -386,7 +386,7 @@ with tab2:
 # TAB 3: AUTOMATION (EXTRACT & DEFANG IoC)
 # ==========================================
 with tab3:
-    st.subheader("⚙️ Clean IoC Extractor & Defang")
+    st.subheader("Clean IoC Extractor & Defang")
     st.markdown("Ekstrak IP, URL, dan Domain otomatis.")
     
     raw_ioc_input = st.text_area(
@@ -444,124 +444,17 @@ with tab3:
                     # Menghitung jumlah IoC menggunakan line count
                     ioc_count = len(defanged_output.split('\n'))
                     st.success(f"Berhasil! Menemukan {ioc_count} indikator unik yang bersih.")
-                    st.text_area("📋 Hasil :", value=defanged_output, height=350)
+                    st.text_area("Hasil :", value=defanged_output, height=350)
                 else:
-                    st.warning("⚠️ Tidak ditemukan IP, URL, atau Domain yang valid pada teks yang diberikan.")
+                    st.warning("Tidak ditemukan IP, URL, atau Domain yang valid pada teks yang diberikan.")
         else:
-            st.error("⚠️ Masukkan teks mentah terlebih dahulu di kotak atas.")
+            st.error("Masukkan teks mentah terlebih dahulu di kotak atas.")
 
 # ==========================================
-# TAB 4: BULK LOG PARSER & FORMATTER
+# TAB 4: CLOUD DOCUMENT CONVERTER (PDF <-> WORD)
 # ==========================================
-with tab4:
-    st.subheader("📝 Bulk Log Parser & Plaintext Formatter")
-    st.markdown("Ekstrak IP dari log mentah SOC, defang otomatis, dan format plaintext.")
-    
-    raw_log_input = st.text_area(
-        "Masukkan Raw Log / Data Mentah (dari SIEM):", 
-        height=300
-    )
-    
-    def parse_and_format_logs(raw_text):
-        lines = raw_text.strip().split('\n')
-        results = []
-        current_alert = "Unknown Alert"
-        current_ips = set()
-        
-        # Regex untuk mendeteksi IPv4 yang valid
-        ip_pattern = re.compile(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b')
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Ekstrak IP jika ada di baris ini
-            found_ips = ip_pattern.findall(line)
-            
-            if found_ips:
-                for ip in found_ips:
-                    current_ips.add(ip)
-            else:
-                # Jika tidak ada IP, cek apakah ini baris angka (jumlah alert) -> abaikan
-                if line.isdigit():
-                    continue
-                
-                # Abaikan baris metadata (URL, Hash, System, Account) yang bukan nama alert
-                lower_line = line.lower()
-                if any(lower_line.startswith(p) for p in ['url:', 'filehash:', 'system:', 'account:', 'host:', 'file:']):
-                    continue
-                    
-                # Jika lolos semua filter di atas, asumsikan ini adalah 'Alert Name'
-                # Simpan alert yang sedang diproses (jika sudah ada isinya) sebelum pindah ke alert baru
-                if current_ips:
-                    results.append({
-                        "alert_name": current_alert,
-                        "ips": list(current_ips)
-                    })
-                    current_ips = set() # Reset untuk alert baru
-                
-                current_alert = line
-                
-        # Simpan blok alert terakhir
-        if current_ips:
-            results.append({
-                "alert_name": current_alert,
-                "ips": list(current_ips)
-            })
-            
-        return results
-
-    if st.button("Parse & Generate Plaintext", type="primary"):
-        if raw_log_input.strip():
-            with st.spinner("Mengekstrak data dan merapikan format..."):
-                parsed_data = parse_and_format_logs(raw_log_input)
-                
-                if not parsed_data:
-                    st.warning("⚠️ Tidak ada IP yang berhasil diekstrak.")
-                else:
-                    output_text = ""
-                    for item in parsed_data:
-                        # Proses Defang IP (titik jadi kurung siku)
-                        defanged_ips = [ip.replace(".", "[.]") for ip in item['ips']]
-                        
-                        # Susun plaintext
-                        output_text += f"Alert Name: {item['alert_name']}\n"
-                        output_text += "Justification: \n" # Dikosongkan sesuai permintaan
-                        output_text += "Indicators:\n"
-                        
-                        # Gabungkan IP dengan koma dan pindah baris
-                        output_text += ",\n".join(defanged_ips) + "\n\n"
-                        
-                        # Pemisah antar alert
-                        output_text += "=========================================\n\n"
-                    
-                    # Bersihkan enter dan sama dengan berlebih di ujung text
-                    output_text = output_text.strip().rstrip("=").strip()
-
-                    st.success(f"Berhasil mengekstrak {len(parsed_data)} Alert!")
-                    st.text_area(
-                        "📋 Plaintext Output:", 
-                        value=output_text, 
-                        height=500
-                    )
-                    
-                    # Fitur Download File TXT
-                    st.download_button(
-                        label="⬇️ Download sebagai .txt",
-                        data=output_text,
-                        file_name=f"Parsed_Indicators_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
-        else:
-            st.error("⚠️ Masukkan teks log mentah terlebih dahulu di kotak atas.")
-
-
-# ==========================================
-# TAB 5: CLOUD DOCUMENT CONVERTER (PDF <-> WORD)
-# ==========================================
-# with tab5:
-#     st.subheader("📄 Cloud Document Converter")
+# with tab4:
+#     st.subheader("Cloud Document Converter")
     
 #     # Memilih mode konversi
 #     convert_mode = st.radio("Type:", ["PDF to Word", "Word to PDF"], key="converter_radio")
@@ -570,7 +463,7 @@ with tab4:
 #         uploaded_pdf = st.file_uploader("Drag & Drop file PDF di sini", type=["pdf"], key="pdf_uploader")
         
 #         if uploaded_pdf is not None:
-#             if st.button("🔄 Konversi ke Word", key="btn_pdf_to_word"):
+#             if st.button("Konversi ke Word", key="btn_pdf_to_word"):
 #                 with st.spinner("memproses konversi..."):
 #                     import tempfile
 #                     import os
@@ -590,24 +483,24 @@ with tab4:
                         
 #                         with open(output_docx, "rb") as file:
 #                             st.download_button(
-#                                 label="⬇️ Download Word (.docx)",
+#                                 label="Download Word (.docx)",
 #                                 data=file,
 #                                 file_name=f"Converted_{uploaded_pdf.name.replace('.pdf', '')}.docx",
 #                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 #                             )
 #                         st.success("Done!")
 #                     except Exception as e:
-#                         st.error(f"❌ Terjadi kesalahan: {e}")
+#                         st.error(f"Terjadi kesalahan: {e}")
 #                     finally:
 #                         if os.path.exists(tmp_pdf_path): os.unlink(tmp_pdf_path)
 #                         if os.path.exists(output_docx): os.unlink(output_docx)
 
 #     elif convert_mode == "Word to PDF":
-#         st.info("💡 Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
+#         st.info("Menggunakan Engine LibreOffice (Linux Cloud Compatibility).")
 #         uploaded_docx = st.file_uploader("Drag & Drop file Word (.docx) di sini", type=["docx"], key="docx_uploader")
         
 #         if uploaded_docx is not None:
-#             if st.button("🔄 Konversi ke PDF", key="btn_word_to_pdf"):
+#             if st.button("Konversi ke PDF", key="btn_word_to_pdf"):
 #                 with st.spinner("Merender PDF via LibreOffice..."):
 #                     import tempfile
 #                     import os
@@ -632,17 +525,17 @@ with tab4:
 #                         if os.path.exists(output_pdf):
 #                             with open(output_pdf, "rb") as file:
 #                                 st.download_button(
-#                                     label="⬇️ Download PDF (.pdf)",
+#                                     label="Download PDF (.pdf)",
 #                                     data=file,
 #                                     file_name=f"Converted_{uploaded_docx.name.replace('.docx', '')}.pdf",
 #                                     mime="application/pdf"
 #                                 )
 #                             st.success("Done!")
 #                         else:
-#                             st.error("❌ Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
+#                             st.error("Gagal membuat PDF. Pastikan 'libreoffice' terinstal di server.")
                             
 #                     except Exception as e:
-#                         st.error(f"❌ Terjadi kesalahan sistem: {e}")
+#                         st.error(f"Terjadi kesalahan sistem: {e}")
 #                         st.warning("Pastikan Anda sudah menambahkan file 'packages.txt' berisi 'libreoffice' di repository GitHub Anda.")
 #                     finally:
 #                         if os.path.exists(tmp_docx_path): os.unlink(tmp_docx_path)
@@ -652,10 +545,10 @@ with tab4:
 
 
 # ==========================================
-# TAB 6: SHIFT HANDOVER SUMMARIZER
+# TAB 5: SHIFT HANDOVER SUMMARIZER
 # ==========================================
-with tab6:
-    st.subheader("📋 Shift Handover Summarizer")
+with tab5:
+    st.subheader("Shift Handover Summarizer")
     st.markdown("Otomatis mengekstrak raw log tiket shift menjadi format template End of Shift Report.")
     
     raw_shift_input = st.text_area(
@@ -761,7 +654,7 @@ with tab6:
                 parsed_data = parse_shift_logs(raw_shift_input)
                 
                 if not parsed_data:
-                    st.warning("⚠️ Tidak ada data log yang valid ditemukan.")
+                    st.warning("Tidak ada data log yang valid ditemukan.")
                 else:
                     incidents = [s for s in parsed_data if s["status"] == "Incident"]
                     attempts = [s for s in parsed_data if s["status"] == "Attempt"]
@@ -809,16 +702,16 @@ with tab6:
                     
                     st.success(f"Berhasil menyusun Laporan End of Shift!")
                     st.text_area(
-                        "📋 Plaintext Handover Output (Siap Copy-Paste):", 
+                        "Plaintext Handover Output (Siap Copy-Paste):", 
                         value=output_text, 
                         height=500
                     )
                     
                     st.download_button(
-                        label="⬇️ Download Rangkuman (.txt)",
+                        label="Download Rangkuman (.txt)",
                         data=output_text,
                         file_name=f"End_Of_Shift_Wildan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                         mime="text/plain"
                     )
         else:
-            st.error("⚠️ Masukkan raw data shift terlebih dahulu di kotak atas.")
+            st.error("Masukkan raw data shift terlebih dahulu di kotak atas.")
