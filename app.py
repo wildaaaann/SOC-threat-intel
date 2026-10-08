@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from google import genai 
 from google.genai import types
 from ioc_extract import extract_iocs, pick_primary, first_public_ip
+from llm_providers import OPENAI_COMPATIBLE, build_attempts, run_chain
 
 # --- MENCEGAH WARNING SSL MUNZUL DI TERMINAL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -281,6 +282,7 @@ ENV_VT = ""
 ENV_ABUSE = ""
 ENV_URLSCAN = ""
 ENV_HYBRID = ""
+ENV_LLM = {}
 
 try:
     ENV_GEMINI = st.secrets.get("GEMINI_API_KEY", "")
@@ -288,12 +290,31 @@ try:
     ENV_ABUSE = st.secrets.get("ABUSEIPDB_API_KEY", "")
     ENV_URLSCAN = st.secrets.get("URLSCAN_API_KEY", "")
     ENV_HYBRID = st.secrets.get("HYBRID_API_KEY", "")
+    ENV_LLM = {
+        "NVIDIA NIM": st.secrets.get("NVIDIA_API_KEY", ""),
+        "Groq": st.secrets.get("GROQ_API_KEY", ""),
+        "OpenRouter": st.secrets.get("OPENROUTER_API_KEY", ""),
+    }
 except:
     pass # Jika secrets.toml tidak ada di lokal, biarkan kosong
 
 # --- SIDEBAR KONFIGURASI API ---
 st.sidebar.header("Konfigurasi API")
-gemini_key = st.sidebar.text_input("Gemini API Key (Wajib)", type="password", value=ENV_GEMINI)
+gemini_key = st.sidebar.text_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", type="password", value=ENV_GEMINI)
+with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
+    st.caption("Dipakai berurutan bila penyedia sebelumnya gagal (batas gratis habis, server sibuk). Kosongkan key untuk melewati penyedia.")
+    llm_extra = {}
+    for _name, _cfg in OPENAI_COMPATIBLE.items():
+        llm_extra[_name] = {
+            "key": st.text_input(f"{_name} API Key", type="password", value=ENV_LLM.get(_name, ""), key=f"llm_key_{_name}"),
+            "model": st.text_input(f"Model {_name}", value=_cfg["model"], key=f"llm_model_{_name}"),
+        }
+    llm_fallback = st.checkbox(
+        "Fallback otomatis ke penyedia lain",
+        value=True,
+        key="llm_fallback",
+        help="Matikan saat pengujian skripsi agar semua laporan berasal dari satu model. Penyedia dan model dicatat di setiap riwayat.",
+    )
 st.sidebar.markdown("---")
 vt_key = st.sidebar.text_input("VirusTotal API Key (Wajib)", type="password", value=ENV_VT)
 abuse_key = st.sidebar.text_input("AbuseIPDB API Key (Wajib)", type="password", value=ENV_ABUSE)
@@ -352,8 +373,8 @@ with tab1:
             st.error("Alert Name dan Primary IoC wajib diisi (atau tempel Raw Alert yang berisi IoC publik)!")
         elif analysis_mode == MODE_ASSISTED and analyst_status is None:
             st.error("Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind.")
-        elif not vt_key or not abuse_key or not gemini_key:
-            st.error("Harap masukkan Gemini, VirusTotal, dan AbuseIPDB API Key di menu Sidebar terlebih dahulu.")
+        elif not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra):
+            st.error("Harap masukkan VirusTotal, AbuseIPDB, dan minimal satu API Key AI (Gemini atau penyedia cadangan) di menu Sidebar terlebih dahulu.")
         else:
             ioc_type = get_ioc_type(ioc)
 
@@ -400,27 +421,28 @@ with tab1:
                     prompt_status = final_verdict_decision if analysis_mode == MODE_ASSISTED else None
                     final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, prompt_status)
 
-                with st.spinner("2/2: Menghasilkan Laporan Akhir dengan Gemini AI..."):
-                    try:
-                        if tls_verify():
-                            client = genai.Client(api_key=gemini_key)
-                        else:
-                            # Verifikasi SSL dimatikan analis lewat sidebar; pilihan ini dicatat di history.
-                            import ssl
-                            custom_ssl_context = ssl.create_default_context()
-                            custom_ssl_context.check_hostname = False
-                            custom_ssl_context.verify_mode = ssl.CERT_NONE
-                            client = genai.Client(
-                                api_key=gemini_key,
-                                http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
-                            )
-                        response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=final_prompt,
+                def gemini_call(prompt_text, key, model):
+                    if tls_verify():
+                        client = genai.Client(api_key=key)
+                    else:
+                        # Verifikasi SSL dimatikan analis lewat sidebar; pilihan ini dicatat di history.
+                        import ssl
+                        custom_ssl_context = ssl.create_default_context()
+                        custom_ssl_context.check_hostname = False
+                        custom_ssl_context.verify_mode = ssl.CERT_NONE
+                        client = genai.Client(
+                            api_key=key,
+                            http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
                         )
-                        final_report_text = response.text
-                    except Exception as e:
-                        final_report_text = f"Terjadi kesalahan saat menghubungi API Gemini: {str(e)}"
+                    return client.models.generate_content(model=model, contents=prompt_text).text
+
+                with st.spinner("2/2: Menghasilkan Laporan Akhir dengan AI..."):
+                    llm_attempts = build_attempts(gemini_key, llm_extra, llm_fallback)
+                    final_report_text, llm_used, llm_log = run_chain(final_prompt, llm_attempts, gemini_call, verify=tls_verify())
+                    if final_report_text is None:
+                        detail = " | ".join(f"{r['Penyedia']}: {r['Detail']}" for r in llm_log)
+                        final_report_text = f"Terjadi kesalahan saat menghubungi penyedia AI. {detail}"
+                        llm_used = {"provider": "-", "model": "-"}
 
                 # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
                 is_blind = analysis_mode == MODE_BLIND
@@ -435,6 +457,10 @@ with tab1:
                     match_label = "Cocok" if ai_verdict == analyst_status else "Tidak cocok"
 
                 st.success(f"Analisis Selesai!")
+                st.caption(f"Laporan dibuat oleh {llm_used['provider']} ({llm_used['model']}).")
+                if len(llm_log) > 1 or llm_log[0]["Status"] != "OK":
+                    st.warning("Penyedia AI utama gagal, laporan memakai penyedia cadangan. Jangan campur hasil beberapa model saat menghitung akurasi: hitung per penyedia dan model.")
+                    st.table(llm_log)
 
                 # --- SIMPAN KE HISTORY ---
                 # Menggunakan .insert(0, ...) agar riwayat terbaru selalu muncul paling atas
@@ -450,6 +476,9 @@ with tab1:
                     "match_label": match_label,
                     "tls_verify": tls_verify(),
                     "cti_log": cti_log,
+                    "llm_provider": llm_used["provider"],
+                    "llm_model": llm_used["model"],
+                    "llm_log": llm_log,
                 })
 
                 # Sumber CTI dan waktu pengambilan selalu terlihat oleh analis
@@ -524,7 +553,7 @@ with tab2:
         for item in st.session_state.history:
             with st.expander(f"[{item['timestamp']}] {item['ioc']} - {item['status']} | AI: {item.get('ai_verdict', '-')}"):
                 st.write(f"**Alert Name:** {item['alert_name']}")
-                st.write(f"**Mode:** {item.get('mode', '-')} | **Pembanding:** {item.get('match_label', '-')} | **Verifikasi SSL:** {'aktif' if item.get('tls_verify', True) else 'mati'}")
+                st.write(f"**Mode:** {item.get('mode', '-')} | **Pembanding:** {item.get('match_label', '-')} | **Verifikasi SSL:** {'aktif' if item.get('tls_verify', True) else 'mati'} | **AI:** {item.get('llm_provider', '-')} ({item.get('llm_model', '-')})")
                 if item.get('cti_log'):
                     st.table(item['cti_log'])
                 st.text_area(
