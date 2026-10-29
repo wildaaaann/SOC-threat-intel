@@ -1,0 +1,50 @@
+[
+  {
+    "id": "S01",
+    "title": "Akses web ke domain populer",
+    "alert_name": "FGT utm:webfilter allowed unusual category",
+    "alert_text": "date=2026-10-29 time=09:12:44 devname=FGT-LAB action=pass srcip=10.20.1.15 hostname=www.example.com url=/index.html catdesc=\"Business\" sentbyte=1210 rcvdbyte=48210",
+    "primary_ioc": "example.com",
+    "related_ip": "",
+    "action_taken": "Allowed",
+    "ground_truth": {
+      "verdict": "False Positive",
+      "correct_actions": ["Tutup sebagai False Positive"],
+      "key_evidence": "Domain rujukan RFC 2606, tidak ada detection di VirusTotal, trafik kecil dan normal."
+    },
+    "synthetic": true,
+    "validated": false
+  },
+  {
+    "id": "S02",
+    "title": "Berkas uji EICAR terdeteksi di endpoint",
+    "alert_name": "Wazuh: malicious file detected on endpoint",
+    "alert_text": "rule.id=87105 agent=WS-LAB-02 full_log: File detected path=C:\\Users\\lab\\Downloads\\eicar.com md5=44d88612fea8a8f36de82e1278abb02f action=quarantine_failed",
+    "primary_ioc": "44d88612fea8a8f36de82e1278abb02f",
+    "related_ip": "",
+    "action_taken": "Detected, quarantine failed",
+    "ground_truth": {
+      "verdict": "True Positive",
+      "correct_actions": ["Isolasi perangkat", "Eskalasi ke tim lain / L2"],
+      "key_evidence": "Hash EICAR dikenali oleh hampir semua engine; karantina gagal sehingga berkas masih ada di endpoint."
+    },
+    "synthetic": true,
+    "validated": false
+  },
+  {
+    "id": "S03",
+    "title": "DNS keluar ke resolver publik",
+    "alert_name": "Outbound DNS to external resolver",
+    "alert_text": "date=2026-10-29 time=10:03:10 devname=FGT-LAB action=accept srcip=10.20.1.30 dstip=8.8.8.8 dstport=53 service=DNS sentbyte=88 rcvdbyte=164",
+    "primary_ioc": "8.8.8.8",
+    "related_ip": "",
+    "action_taken": "Accepted",
+    "ground_truth": {
+      "verdict": "Likely Benign",
+      "correct_actions": ["Tutup sebagai False Positive", "Pantau / tunggu data tambahan"],
+      "key_evidence": "Resolver publik Google, volume kecil, tidak ada laporan penyalahgunaan; kebijakan DNS internal bisa dikoreksi terpisah."
+    },
+    "synthetic": true,
+    "validated": false
+  }
+]
