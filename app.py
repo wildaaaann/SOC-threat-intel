@@ -2,16 +2,18 @@ import streamlit as st
 import hmac
 import os
 import re
-import requests
 import json
 import urllib3
 from datetime import datetime, timezone
-from google import genai 
-from google.genai import types
 from ioc_extract import extract_iocs, pick_primary, first_public_ip
-from llm_providers import OPENAI_COMPATIBLE, build_attempts, run_chain
+from llm_providers import OPENAI_COMPATIBLE, build_attempts, gemini_generate
+from triage_pipeline import enrich, generate_report
 from time import monotonic as _monotonic
-from triage_report import VERDICTS, UNREADABLE, parse_ai_verdict, layers_complete, layers_status
+from triage_report import (SEVERITIES, VERDICTS, UNREADABLE, parse_ai_verdict, layers_complete, layers_status,
+                           parse_closing_reason, parse_description, parse_recommendations, parse_severity)
+from ticket_policy import (PRIORITY_HUMAN, REVIEW_PENDING, STATUS_CLOSED_AI, STATUS_NEEDS_HUMAN, review_changes,
+                           sort_for_review, summarize_tickets)
+from ticket_store import TicketStore, read_worker_state, tickets_to_csv
 from wazuh_client import WazuhError, alert_label, alert_to_inputs, fetch_alerts, parse_alerts_file, parse_timestamp
 from scenarios import RESPONSE_ACTIONS, load_scenarios, parse_scenarios
 from trial_store import CSV_FIELDS, TrialStore, new_trial_id, trials_to_csv, utc_now_iso
@@ -21,257 +23,10 @@ from evaluation import (CONDITION_LABEL, ai_is_correct, data_quality, format_row
 # --- MENCEGAH WARNING SSL MUNZUL DI TERMINAL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- KONSTANTA & PROMPT ---
-SOC_ANALYST_ROLE = """
-You are a 'SOC Analyst'. Your primary role is to analyze potential threats based on provided data. Your goal is to provide a clear, concise, and actionable report.
-
-Behaviors and Rules:
-1) Initial Data Review: Correlate all provided context.
-2) Threat Analysis and Report Generation:
-a) You MUST present your findings using the exact template below. Do not add, remove, or re-order sections.
-b) CRITICAL: You MUST defang all domains in your final generated report by replacing each period '.' with '[.]'. For example, write 'example.com' as 'example[.]com'. DO NOT defang IP addresses.
-c) If tools like URLScan or HybridAnalysis are not present or return errors/no data, you MUST state "N/A".
-d) DO NOT use any markdown formatting (like asterisks or hashes) in the output. Keep it plain text.
-e) Keep the three layers apart. LAYER 1 restates only what the alert data says, in neutral words. LAYER 2 restates only what each CTI source returned, naming the source and its retrieval time. LAYER 3 is the only place for judgement: each claim names the Layer 1 or Layer 2 item that supports it, and states what is uncertain or missing.
-f) The Conclusion line starts with exactly one verdict, followed by a period and one sentence of reason.
-
---- REPORT TEMPLATE ---
-1. INDICATOR OF COMPROMISE (IoC)
-IoC: [The primary IoC, defanged if domain]
-IoC Type: [IP, Domain, MD5, SHA1, or SHA256]
-
-2. LAYER 1 - ALERT FACTS
-Alert Name: [Name of the alert]
-Action Taken: [Action taken, e.g., Blocked, or "N/A"]
-Alert Fields: [Rule, level, MITRE and other fields from the Alert Fields data, or "N/A"]
-Other IoCs in the alert: [IoCs listed as extracted from the alert, or "N/A"]
-
-3. LAYER 2 - CTI ENRICHMENT
-First Seen: [Date or N/A]
-Last Seen: [Date or N/A]
-URLScan: [Summary of URLScan data, or "N/A"]
-VirusTotal: [Summary of VirusTotal detections, e.g., 7/93, and key relationship findings]
-AbuseIPDB: [Summary of AbuseIPDB confidence score and reports based on the related IP, or "N/A"]
-HybridAnalysis: [Summary of HybridAnalysis data, or "N/A"]
-Initial Verdict: [The initial verdict provided in the data]
-Retrieval: [Each source with its retrieval time in UTC, taken from the CTI Retrieval Log]
-
-4. LAYER 3 - AI INFERENCE
-Conclusion: [True Positive|False Positive|Likely Benign]. [One sentence of reason]
-Description: [Synthesize the alert details and threat intel into a clear narrative explaining the threat. Assess the potential risk and explain WHAT this threat actually does based on the evidence.]
-Basis: [The Layer 1 and Layer 2 items that support the conclusion]
-Uncertainty: [What is missing, ambiguous, or could change the conclusion]
-
-5. RECOMMENDATIONS
-[Actionable step 1]
-[Actionable step 2]
-[Actionable step 3]
-
-6. SUMMARY
-[Summarize the entire analysis and recommended action in 1-2 clear, concise sentences.]
---- END OF TEMPLATE ---
-"""
-
-# --- FUNGSI HELPER & API ---
-def defang_ioc(ioc_string, ioc_type):
-    if ioc_type == 'domain' and isinstance(ioc_string, str):
-        return ioc_string.replace('.', '[.]')
-    return ioc_string
-
-def get_ioc_type(ioc):
-    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ioc): return "ip"
-    if re.match(r"^[a-fA-F0-9]{32}$", ioc): return "md5"
-    if re.match(r"^[a-fA-F0-9]{40}$", ioc): return "sha1"
-    if re.match(r"^[a-fA-F0-9]{64}$", ioc): return "sha256"
-    if '.' in ioc and not ' ' in ioc: return "domain"
-    return "unknown"
-
+# --- FUNGSI HELPER ---
 def tls_verify():
     """Verifikasi sertifikat SSL aktif secara default. Hanya mati jika analis mematikannya di sidebar."""
     return st.session_state.get("tls_verify", True)
-
-def query_virustotal(ioc, ioc_type, api_key):
-    if not api_key: return '{"error": "VirusTotal API key not configured."}'
-    if ioc_type == "ip": url = f"https://www.virustotal.com/api/v3/ip_addresses/{ioc}"
-    elif ioc_type in ["md5", "sha1", "sha256"]: url = f"https://www.virustotal.com/api/v3/files/{ioc}"
-    elif ioc_type == "domain": url = f"https://www.virustotal.com/api/v3/domains/{ioc}"
-    else: return '{"error": "Unsupported IoC type."}'
-    try:
-        response = requests.get(url, headers={"x-apikey": api_key}, timeout=15, verify=tls_verify())
-        response.raise_for_status()
-        return json.dumps(response.json().get("data", {}).get("attributes", {}), indent=2)
-    except Exception as e: return f'{{"error": "{str(e)}"}}'
-
-def query_virustotal_relationships(ioc, ioc_type, api_key):
-    if not api_key: return {}
-    base_urls = {"ip": f"https://www.virustotal.com/api/v3/ip_addresses/{ioc}/", "domain": f"https://www.virustotal.com/api/v3/domains/{ioc}/", "file": f"https://www.virustotal.com/api/v3/files/{ioc}/"}
-    endpoints_map = {"ip": ["resolutions", "communicating_files"], "domain": ["resolutions", "communicating_files"], "file": ["contacted_domains", "contacted_ips", "execution_parents"]}
-    ioc_key = "file" if ioc_type in ["md5", "sha1", "sha256"] else ioc_type
-    if ioc_key not in base_urls: return {}
-    relationship_data = {}
-    for endpoint in endpoints_map[ioc_key]:
-        try:
-            response = requests.get(base_urls[ioc_key] + endpoint, headers={"x-apikey": api_key}, params={'limit': 10}, timeout=15, verify=tls_verify())
-            response.raise_for_status()
-            relationship_data[endpoint] = response.json().get("data", [])
-        except Exception as e: relationship_data[endpoint] = {"error": str(e)}
-    return relationship_data
-
-def query_abuseipdb(ip, api_key):
-    if not ip: return ""
-    if not api_key: return '{"error": "AbuseIPDB API key not configured."}'
-    try:
-        response = requests.get("https://api.abuseipdb.com/api/v2/check", headers={"Accept": "application/json", "Key": api_key}, params={"ipAddress": ip, "maxAgeInDays": "90", "verbose": ""}, timeout=15, verify=tls_verify())
-        response.raise_for_status()
-        return json.dumps(response.json().get("data", {}), indent=2)
-    except Exception as e: return f'{{"error": "{str(e)}"}}'
-
-def query_tip_neiki(ioc, ioc_type):
-    if ioc_type not in ["md5", "sha1", "sha256"]: return ""
-    try:
-        response = requests.get(f"https://tip.neiki.dev/api/reports/file/{ioc}", timeout=30, verify=tls_verify())
-        response.raise_for_status()
-        return json.dumps(response.json(), indent=2)
-    except Exception as e: return f'{{"error": "{str(e)}"}}'
-
-def query_urlscan(ioc, ioc_type, api_key):
-    if not api_key: return '{"error": "URLScan API key not configured."}'
-    if ioc_type not in ['domain', 'ip']: return ""
-    try:
-        headers = {'API-Key': api_key, 'Content-Type': 'application/json'}
-        query_val = f"domain:{ioc}" if ioc_type == "domain" else f"ip:{ioc}"
-        response = requests.get(f"https://urlscan.io/api/v1/search/?q={query_val}", headers=headers, timeout=15, verify=tls_verify())
-        response.raise_for_status()
-        results = response.json().get('results', [])
-        if results:
-            top_result = results[0]
-            summary = {"latest_scan_url": top_result.get('result'), "verdicts": top_result.get('verdicts', {}), "task_time": top_result.get('task', {}).get('time')}
-            return json.dumps(summary, indent=2)
-        return '{"message": "No previous scans found on URLScan."}'
-    except Exception as e: return f'{{"error": "{str(e)}"}}'
-
-def query_hybridanalysis(ioc, ioc_type, api_key):
-    if not api_key: return '{"error": "HybridAnalysis API key not configured."}'
-    if ioc_type not in ["md5", "sha1", "sha256"]: return ""
-    try:
-        # Tambahkan Content-Type dan hapus 'www.' pada URL
-        headers = {
-            'api-key': api_key, 
-            'User-Agent': 'Falcon Sandbox',
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-        response = requests.post("https://hybrid-analysis.com/api/v2/search/hash", headers=headers, data={'hash': ioc}, timeout=15, verify=tls_verify())
-        response.raise_for_status()
-        results = response.json()
-        if results and isinstance(results, list) and len(results) > 0:
-            top = results[0]
-            summary = {"verdict": top.get("verdict"), "threat_score": top.get("threat_score"), "environment": top.get("environment_description")}
-            return json.dumps(summary, indent=2)
-        return '{"message": "No reports found on HybridAnalysis."}'
-    except Exception as e: return f'{{"error": "{str(e)}"}}'
-
-def generate_initial_verdict(ioc_type, vt_data_str, abuse_data_str):
-    verdict, reasons = "Likely Benign", []
-    try: vt_data = json.loads(vt_data_str)
-    except: vt_data = {}
-    try: abuse_data = json.loads(abuse_data_str) if abuse_data_str else {}
-    except: abuse_data = {}
-    
-    if ioc_type in ["md5", "sha1", "sha256"]:
-        malicious = vt_data.get("last_analysis_stats", {}).get("malicious", 0)
-        if 0 < malicious < 10: verdict, reasons = "False Positive", [f"VT: {malicious} (<10)"]
-        elif malicious >= 10: verdict, reasons = "Likely Malicious", [f"VT: {malicious} (>=10)"]
-    elif ioc_type == 'ip':
-        conf = abuse_data.get("abuseConfidenceScore", -1)
-        if conf == 0: verdict, reasons = "False Positive", ["AbuseIPDB: 0%"]
-        elif conf > 0: verdict, reasons = "Likely Malicious", [f"AbuseIPDB: {conf}%"]
-        malicious = vt_data.get("last_analysis_stats", {}).get("malicious", 0)
-        if malicious > 0: reasons.append(f"VT: {malicious}")
-    elif ioc_type == 'domain':
-        malicious = vt_data.get("last_analysis_stats", {}).get("malicious", 0)
-        if malicious > 4: verdict, reasons = "Likely Malicious", [f"VT: {malicious}"]
-        elif malicious > 0: verdict, reasons = "Suspicious", [f"VT: {malicious}"]
-
-    if not reasons: return "Likely Benign (No negative indicators found)"
-    return f"{verdict} ({'; '.join(reasons)})"
-
-def summarize_cti(source, result):
-    """Ringkas hasil satu sumber CTI menjadi (status, temuan utama)."""
-    if not result:
-        return "Dilewati", "Tidak berlaku untuk tipe IoC ini"
-    if isinstance(result, dict):  # relationships VirusTotal
-        errors = [f"{k}: {v['error']}" for k, v in result.items() if isinstance(v, dict) and "error" in v]
-        counts = ", ".join(f"{k}: {len(v)}" for k, v in result.items() if isinstance(v, list))
-        if errors and not counts:
-            return "Gagal", "; ".join(errors)[:140]
-        return "OK", counts or "Tidak ada relasi"
-    try:
-        data = json.loads(result)
-    except Exception:
-        return "Gagal", "Respons bukan JSON"
-    if "error" in data:
-        return "Gagal", str(data["error"])[:140]
-    if list(data.keys()) == ["message"]:
-        return "Tidak ada data", str(data["message"])
-    if source == "VirusTotal":
-        stats = data.get("last_analysis_stats", {})
-        return "OK", f"malicious {stats.get('malicious', 0)} dari {sum(stats.values()) or '?'} engine"
-    if source == "AbuseIPDB":
-        return "OK", f"confidence {data.get('abuseConfidenceScore', '?')}%, laporan {data.get('totalReports', '?')}"
-    if source == "URLScan":
-        overall = data.get("verdicts", {}).get("overall", {})
-        return "OK", f"verdict overall malicious={overall.get('malicious', '?')}, score={overall.get('score', '?')}"
-    if source == "HybridAnalysis":
-        return "OK", f"verdict {data.get('verdict', '?')}, threat_score {data.get('threat_score', '?')}"
-    return "OK", "Data diterima"
-
-def run_cti(log, source, queried, applicable, fn, *args):
-    """Jalankan satu query CTI dan catat sumber, nilai yang di-query, waktu UTC, status, dan temuan utama."""
-    if not applicable:
-        log.append({"Sumber": source, "Query": queried, "Waktu (UTC)": "n/a", "Status": "Dilewati", "Temuan": "Tidak berlaku untuk tipe IoC ini"})
-        return ""
-    result = fn(*args)
-    status, finding = summarize_cti(source, result)
-    log.append({
-        "Sumber": source,
-        "Query": queried,
-        "Waktu (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "Status": status,
-        "Temuan": finding,
-    })
-    return result
-
-def generate_prompt(alert_name, ioc, ioc_type, action, collated_data, initial_verdict, first_seen, last_seen, final_verdict_decision=None, alert_fields=None):
-    # final_verdict_decision=None berarti mode Blind: status analis tidak boleh sampai ke AI.
-    if final_verdict_decision:
-        verdict_instruction = f"It is a {final_verdict_decision}, please make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website."
-    else:
-        verdict_instruction = (
-            "No analyst verdict is provided. Decide the verdict yourself, using only the data above: True Positive, False Positive, or Likely Benign. "
-            "Start the Conclusion line in LAYER 3 with exactly that verdict followed by a period, for example 'Conclusion: False Positive. ...'. "
-            "Then make the draft accordingly in blockcode without any text formatting and without any cite in domain related to gambling/pornography/red website website."
-        )
-    # alert_fields hanya berisi kolom alert yang aman dikirim (lihat LLM_SAFE_FIELDS di wazuh_client.py).
-    fields_text = "\n".join(f"- {line}" for line in (alert_fields or [])) or "N/A"
-    return f"""{SOC_ANALYST_ROLE}
-
---- START OF DATA ---
-Alert Name: {alert_name}
-Action Taken: {action if action else "N/A"}
-Alert Fields:
-{fields_text}
-IoC: {defang_ioc(ioc, ioc_type)}
-First Seen: {first_seen}
-Last Seen: {last_seen}
-Initial Verdict: {initial_verdict}
-
-Threat Intelligence Data (JSON):
-{collated_data}
---- END OF DATA ---
-
-Generate the report based on the data and follow the template and rules exactly. Execute based on the data given and also refer to the initial verdict.
-{verdict_instruction}
-"""
 
 # --- INISIALISASI SESSION STATE UNTUK HISTORY ---
 if "history" not in st.session_state:
@@ -365,6 +120,8 @@ except NameError:
     _APP_DIR = os.getcwd()
 SCENARIO_FILE = os.path.join(_APP_DIR, "scenarios", "scenarios.json")
 STORE = TrialStore(os.environ.get("TRIALS_PATH", os.path.join(_APP_DIR, "data", "trials.jsonl")))
+TICKETS = TicketStore(os.environ.get("TICKETS_PATH", os.path.join(_APP_DIR, "data", "tickets.jsonl")))
+WORKER_STATE_PATH = os.path.join(os.path.dirname(TICKETS.path), "worker_state.json")  # sama dengan worker.py
 
 if "runs" not in st.session_state:
     st.session_state.runs = {}
@@ -373,87 +130,34 @@ if "run_counter" not in st.session_state:
 
 
 def gemini_call(prompt_text, key, model):
-    if tls_verify():
-        client = genai.Client(api_key=key)
-    else:
-        # Verifikasi SSL dimatikan analis lewat sidebar; pilihan ini dicatat di history.
-        import ssl
-        custom_ssl_context = ssl.create_default_context()
-        custom_ssl_context.check_hostname = False
-        custom_ssl_context.verify_mode = ssl.CERT_NONE
-        client = genai.Client(
-            api_key=key,
-            http_options=types.HttpOptions(client_args={'verify': custom_ssl_context})
-        )
-    return client.models.generate_content(model=model, contents=prompt_text).text
+    return gemini_generate(prompt_text, key, model, verify=tls_verify())
 
 
 def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, raw_text, analysis_mode, alert_fields=None):
     """Pengayaan CTI lalu laporan AI. Mengembalikan dict hasil, atau {"error": pesan} bila masukan belum lengkap."""
-    extracted_iocs = extract_iocs(raw_text)
-    ioc = (ioc_input or "").strip() or (pick_primary(extracted_iocs) or "")
-
-    if not alert_name or not ioc:
-        return {"error": "Alert Name dan Primary IoC wajib diisi (atau tempel Raw Alert yang berisi IoC publik)!"}
     if analysis_mode == MODE_ASSISTED and analyst_status is None:
         return {"error": "Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind."}
     if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra):
         return {"error": "Harap masukkan VirusTotal, AbuseIPDB, dan minimal satu API Key AI (Gemini atau penyedia cadangan) di menu Sidebar terlebih dahulu."}
-    ioc_type = get_ioc_type(ioc)
-    if ioc_type == "unknown":
-        return {"error": f"Tidak dapat mendeteksi tipe IoC untuk: '{ioc}'. Pastikan formatnya benar."}
 
-    with st.spinner(f"1/2: Mengambil data intel untuk {ioc_type.upper()} {defang_ioc(ioc, ioc_type)}..."):
-        target_ip_for_abuse = ioc if ioc_type == 'ip' else ((related_ip or "").strip() or first_public_ip(extracted_iocs) or "")
-        is_hash = ioc_type in ["md5", "sha1", "sha256"]
-        cti_log = []
-
-        vt_results = run_cti(cti_log, "VirusTotal", ioc, True, query_virustotal, ioc, ioc_type, vt_key)
-        vt_rel_results = run_cti(cti_log, "VirusTotal (relationships)", ioc, True, query_virustotal_relationships, ioc, ioc_type, vt_key)
-        abuse_results = run_cti(cti_log, "AbuseIPDB", target_ip_for_abuse or "n/a", bool(target_ip_for_abuse), query_abuseipdb, target_ip_for_abuse, abuse_key)
-        urlscan_results = run_cti(cti_log, "URLScan", ioc, ioc_type in ['domain', 'ip'], query_urlscan, ioc, ioc_type, urlscan_key)
-        hybrid_results = run_cti(cti_log, "HybridAnalysis", ioc, is_hash, query_hybridanalysis, ioc, ioc_type, hybrid_key)
-        tip_results = run_cti(cti_log, "TIP Neiki", ioc, is_hash, query_tip_neiki, ioc, ioc_type)
-
-        first_seen, last_seen = "N/A", "N/A"
-        try:
-            vt_dict = json.loads(vt_results)
-            if vt_dict.get('last_analysis_date'):
-                last_seen = datetime.fromtimestamp(vt_dict['last_analysis_date']).strftime('%Y-%m-%d %H:%M:%S UTC')
-        except: pass
-
-        verdict = generate_initial_verdict(ioc_type, vt_results, abuse_results)
-
-        collated = f"VirusTotal Data:\n{vt_results}\n"
-        if vt_rel_results: collated += f"\nVirusTotal Relationships:\n{json.dumps(vt_rel_results, indent=2)}\n"
-        if abuse_results: collated += f"\nAbuseIPDB Data:\n{abuse_results}\n"
-        if urlscan_results: collated += f"\nURLScan Data:\n{urlscan_results}\n"
-        if hybrid_results: collated += f"\nHybridAnalysis Data:\n{hybrid_results}\n"
-        if tip_results: collated += f"\nTIP Neiki Data:\n{tip_results}\n"
-
-        # Hanya IoC hasil ekstraksi dan kolom alert yang aman yang ikut ke prompt. Teks mentah alert tidak dikirim ke AI.
-        other_iocs = [i for i in extracted_iocs if i["value"] != ioc]
-        if other_iocs:
-            collated += "\nOther IoCs extracted from the alert (not enriched):\n"
-            collated += "\n".join(f"- {i['type']}: {i['value']}" + ("" if i["public"] else " (private/non-routable)") for i in other_iocs) + "\n"
-        collated += "\nCTI Retrieval Log (UTC):\n"
-        collated += "\n".join(f"- {r['Sumber']} | query: {r['Query']} | {r['Waktu (UTC)']} | {r['Status']}: {r['Temuan']}" for r in cti_log) + "\n"
-
-        # Mode Blind: status analis tidak dikirim ke AI (None).
-        prompt_status = analyst_status if analysis_mode == MODE_ASSISTED else None
-        final_prompt = generate_prompt(alert_name, ioc, ioc_type, action, collated, verdict, first_seen, last_seen, prompt_status, alert_fields)
+    verify = tls_verify()
+    # Mode Blind: status analis tidak dikirim ke AI (None).
+    prompt_status = analyst_status if analysis_mode == MODE_ASSISTED else None
+    with st.spinner("1/2: Mengambil data intel dari sumber CTI..."):
+        ctx = enrich(
+            alert_name=alert_name, ioc_input=ioc_input, related_ip=related_ip, raw_text=raw_text, action=action,
+            alert_fields=alert_fields, prompt_status=prompt_status,
+            keys={"vt": vt_key, "abuse": abuse_key, "urlscan": urlscan_key, "hybrid": hybrid_key}, verify=verify,
+        )
+    if "error" in ctx:
+        return ctx
 
     with st.spinner("2/2: Menghasilkan Laporan Akhir dengan AI..."):
-        llm_attempts = build_attempts(gemini_key, llm_extra, llm_fallback)
-        final_report_text, llm_used, llm_log = run_chain(final_prompt, llm_attempts, gemini_call, verify=tls_verify())
-        if final_report_text is None:
-            detail = " | ".join(f"{r['Penyedia']}: {r['Detail']}" for r in llm_log)
-            final_report_text = f"Terjadi kesalahan saat menghubungi penyedia AI. {detail}"
-            llm_used = {"provider": "-", "model": "-"}
+        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback), gemini_call, verify)
 
     # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
     is_blind = analysis_mode == MODE_BLIND
-    ai_verdict = parse_ai_verdict(final_report_text) if is_blind else "-"
+    ai_verdict = parse_ai_verdict(gen["report"]) if is_blind else "-"
     if not is_blind:
         match_label = "Tidak dinilai (mode Dibantu)"
     elif analyst_status is None:
@@ -463,17 +167,13 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
     else:
         match_label = "Cocok" if ai_verdict == analyst_status else "Tidak cocok"
 
-    cert_failed = any(
-        "certificate_verify_failed" in str(r).lower()
-        for r in (vt_results, vt_rel_results, abuse_results, urlscan_results, hybrid_results, tip_results, final_report_text)
-    )
     return {
-        "ioc": ioc, "ioc_type": ioc_type, "alert_name": alert_name, "analysis_mode": analysis_mode, "is_blind": is_blind,
-        "analyst_status": analyst_status, "final_prompt": final_prompt, "collated": collated, "report": final_report_text,
-        "llm_used": llm_used, "llm_log": llm_log, "llm_fallback_used": llm_log[0]["Status"] != "OK",
-        "ai_verdict": ai_verdict, "match_label": match_label, "cti_log": cti_log, "extracted_iocs": extracted_iocs,
-        "target_ip": target_ip_for_abuse, "cert_failed": cert_failed, "layers": layers_status(final_report_text),
-        "layers_ok": layers_complete(final_report_text), "tls_verify": tls_verify(),
+        "ioc": ctx["ioc"], "ioc_type": ctx["ioc_type"], "alert_name": alert_name, "analysis_mode": analysis_mode, "is_blind": is_blind,
+        "analyst_status": analyst_status, "final_prompt": ctx["final_prompt"], "collated": ctx["collated"], "report": gen["report"],
+        "llm_used": gen["llm_used"], "llm_log": gen["llm_log"], "llm_fallback_used": gen["llm_fallback_used"],
+        "ai_verdict": ai_verdict, "match_label": match_label, "cti_log": ctx["cti_log"], "extracted_iocs": ctx["extracted_iocs"],
+        "target_ip": ctx["target_ip"], "cert_failed": gen["cert_failed"], "layers": gen["layers"],
+        "layers_ok": gen["layers_ok"], "tls_verify": verify,
     }
 
 
@@ -550,6 +250,11 @@ def render_result(res, key, run_id, show_comparison=True):
     if not res["layers_ok"]:
         missing = [name for name, ok in res["layers"].items() if not ok]
         st.warning(f"Laporan tidak memuat semua lapisan templat (fakta alert, pengayaan CTI, inferensi AI). Lapisan yang hilang: {', '.join(missing)}. Kejadian ini dicatat pada hasil evaluasi.")
+
+    # Empat kolom hasil AI. Ini bukan formulir keputusan: keputusan analis tetap dicatat di form terpisah.
+    st.subheader("Hasil AI per kolom")
+    st.table([{"Kolom": label, "AI": value if value and value != UNREADABLE else "(tidak terbaca)"} for label, value in ai_columns(
+        parse_severity(res["report"]), parse_closing_reason(res["report"]), parse_description(res["report"]), parse_recommendations(res["report"]))])
 
     # Menampilkan Laporan Akhir
     st.subheader("Final Report :")
@@ -671,6 +376,180 @@ def get_scenarios():
     return load_scenarios(SCENARIO_FILE)
 
 
+def clip(text, limit=90):
+    """Potong teks panjang untuk sel tabel; teks lengkap tetap ada di detail tiket dan CSV."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def ai_columns(severity, closing_reason, description, recommendations):
+    """Empat kolom hasil AI dengan label yang sama di tab Alert Manual dan tiket otomatis."""
+    return [("Severity", severity), ("Reason untuk closing", closing_reason), ("Description", description), ("RECOMMENDATIONS", recommendations)]
+
+
+def render_ticket_queue():
+    """Mode Otomatis: tiket yang dibuat worker. Manusia hanya membaca dan memastikan severity serta alasan penutupan."""
+    st.subheader("Tiket otomatis dari Wazuh")
+    st.markdown(
+        "Alert Wazuh masuk sendiri lewat worker, diperkaya CTI dan AI, lalu ditutup AI beserta rekomendasi, deskripsi, severity, dan alasan penutupan. "
+        "Tugas Anda: pastikan severity dan alasan penutupan sudah benar. Pengayaan tidak bisa dijalankan ulang dari sini."
+    )
+
+    state = read_worker_state(WORKER_STATE_PATH)
+    last_cycle = state.get("last_cycle_utc")
+    if not last_cycle:
+        st.warning("Worker belum pernah berjalan. Jalankan `python3 worker.py` di server Wazuh (contoh layanan ada di folder deploy/).")
+    else:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.strptime(last_cycle, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)).total_seconds()
+        except ValueError:
+            age = 0
+        poll = int(state.get("poll_seconds") or 60)
+        if age > 3 * poll:
+            st.error(f"Worker tidak aktif. Putaran terakhir {last_cycle} UTC ({int(age // 60)} menit lalu). Alert yang masuk sejak itu belum menjadi tiket.")
+        else:
+            st.caption(f"Worker aktif. Putaran terakhir {last_cycle} UTC. Level alert minimum {state.get('min_level', '?')}. Total diproses {state.get('processed_total', 0)}.")
+        if state.get("last_error"):
+            st.warning(f"Galat terakhir worker: {state['last_error']}")
+        if state.get("backlog"):
+            st.warning("Antrean menumpuk: worker belum mengejar alert terbaru. Penyebab umum: kuota CTI atau AI gratis, atau laju alert terlalu tinggi.")
+
+    try:
+        tickets = TICKETS.all()
+    except OSError as exc:
+        tickets = []
+        st.error(f"Tidak bisa membaca {TICKETS.path}: {exc}")
+
+    st.markdown("#### Ringkasan")
+    st.table([{"Ukuran": k, "Nilai": str(v)} for k, v in format_rows([summarize_tickets(tickets)])[0].items()])
+    st.caption("Severity dan alasan disetujui = seberapa sering reviewer setuju dengan AI. Dihitung dari tiket Closed by AI yang sudah direview.")
+
+    if not tickets:
+        st.info("Belum ada tiket. Tiket muncul setelah worker memproses alert Wazuh level yang memenuhi syarat.")
+        return
+
+    view = st.radio("Tampilkan:", ["Belum direview", "Semua", "Sudah direview"], horizontal=True, key="tk_filter")
+    if view == "Belum direview":
+        shown = [t for t in tickets if t.get("review_status") == REVIEW_PENDING]
+    elif view == "Sudah direview":
+        shown = [t for t in tickets if t.get("review_status") != REVIEW_PENDING]
+    else:
+        shown = list(tickets)
+    shown = sort_for_review(shown)
+
+    st.download_button("Unduh CSV tiket", tickets_to_csv(tickets), "tickets.csv", "text/csv", key="dl_tickets_csv")
+    if not shown:
+        st.info("Tidak ada tiket pada tampilan ini.")
+        return
+
+    st.caption("Kolom AI diisi otomatis oleh worker. Kolom Manual berisi nilai akhir dari reviewer dan kosong sampai tiket direview.")
+    st.dataframe([{
+        "Prioritas review": str(t.get("review_priority") or ""), "Status": str(t.get("status") or ""), "Verdict AI": str(t.get("ai_verdict") or ""),
+        "Waktu alert": (t.get("alert_timestamp") or "")[:19], "Rule": clip(f"{t.get('rule_id', '')} {t.get('rule_description', '')}", 60),
+        "Agent": str(t.get("agent_name") or ""), "IoC": t.get("ioc") or "-",
+        "AI: Severity": str(t.get("severity") or ""), "AI: Reason untuk closing": clip(t.get("closing_reason")),
+        "AI: Description": clip(t.get("description")), "AI: RECOMMENDATIONS": clip(t.get("recommendations")),
+        "Manual: Severity": str(t.get("final_severity") or ""), "Manual: Reason untuk closing": clip(t.get("final_reason")),
+        "Manual: Description": clip(t.get("final_description")), "Manual: RECOMMENDATIONS": clip(t.get("final_recommendations")),
+        "Review": str(t.get("review_status") or ""),
+    } for t in shown], hide_index=True)
+
+    labels = {t["id"]: f"[{t.get('review_priority')}] {(t.get('alert_timestamp') or '')[:19]} | {t.get('rule_description') or '(tanpa deskripsi)'} | {t.get('ai_verdict')} / {t.get('severity')}" for t in shown}
+    ticket_id = st.selectbox("Buka tiket:", list(labels), format_func=labels.get, key="tk_pick")
+    render_ticket_detail(next(t for t in shown if t["id"] == ticket_id))
+
+
+def render_ticket_detail(ticket):
+    tid = ticket["id"]
+    st.markdown("---")
+    st.subheader(f"Tiket {ticket.get('rule_description') or tid}")
+    if ticket["status"] == STATUS_NEEDS_HUMAN:
+        st.error("AI tidak menutup tiket ini. Alasan: " + "; ".join(ticket.get("hold_reasons") or ["tidak diketahui"]) + ". Tiket menunggu keputusan manusia.")
+    else:
+        st.success(f"Ditutup oleh AI. Review: {ticket.get('review_priority')}.")
+        if ticket.get("ai_verdict") == "True Positive":
+            st.warning("AI menilai ini True Positive dan tetap menutupnya. Baca alasan penutupan dengan teliti sebelum mengonfirmasi.")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Verdict AI", ticket.get("ai_verdict") or "-")
+    c2.metric("Severity AI", ticket.get("severity") or "-")
+    c3.metric("Level rule Wazuh", ticket.get("rule_level") if ticket.get("rule_level") is not None else "-")
+
+    reviewed = ticket.get("review_status") != REVIEW_PENDING
+    col_ai, col_manual = st.columns(2)
+    manual_values = {"Severity": ticket.get("final_severity"), "Reason untuk closing": ticket.get("final_reason"),
+                     "Description": ticket.get("final_description"), "RECOMMENDATIONS": ticket.get("final_recommendations")}
+    with col_ai:
+        st.markdown("#### AI enrichment")
+        for label, value in ai_columns(ticket.get("severity"), ticket.get("closing_reason"), ticket.get("description"), ticket.get("recommendations")):
+            st.markdown(f"**{label}**")
+            st.text(value or "(kosong)")
+    with col_manual:
+        st.markdown("#### Manual (reviewer)")
+        for label in manual_values:
+            st.markdown(f"**{label}**")
+            st.text(manual_values[label] or ("(kosong)" if reviewed else "(belum direview)"))
+
+    st.markdown("**Entities (nama field mengikuti SIEM):**")
+    st.table([{"Field SIEM": e.get("field", "-"), "Tipe": e["type"], "Nilai": e["value"], "Peran": e["role"], "Publik": {True: "ya", False: "tidak"}.get(e.get("public"), "-")} for e in ticket.get("entities", [])])
+    if ticket.get("cti_log"):
+        st.markdown("**Sumber CTI dan waktu pengambilan:**")
+        st.table(ticket["cti_log"])
+    st.caption(f"Laporan dibuat oleh {ticket.get('llm_provider') or '-'} ({ticket.get('llm_model') or '-'}). "
+               f"Verifikasi SSL: {'aktif' if ticket.get('tls_verify', True) else 'mati'}. Diproses {ticket.get('processed_at_utc')} UTC dalam {ticket.get('processing_s')} detik.")
+    if ticket.get("llm_fallback_used"):
+        st.warning("Penyedia AI utama gagal, laporan memakai penyedia cadangan.")
+    if ticket.get("report"):
+        with st.expander("Laporan lengkap AI"):
+            st.text(ticket["report"])
+
+    st.markdown("---")
+    if ticket.get("review_status") != REVIEW_PENDING:
+        st.success(
+            f"Sudah direview oleh {ticket.get('reviewer')} ({ticket.get('review_status')}). Severity akhir: {ticket.get('final_severity')}. "
+            f"Alasan akhir: {ticket.get('final_reason')}"
+        )
+        return
+
+    st.subheader("Review")
+    with st.form(f"review_form_{tid}"):
+        reviewer = st.text_input("Kode reviewer:", value=st.session_state.get("participant_code", ""), key=f"rv_who_{tid}")
+        final_severity = st.selectbox("Severity yang benar:", list(SEVERITIES), index=None, placeholder="Pilih severity", key=f"rv_sev_{tid}")
+        if ticket["status"] == STATUS_CLOSED_AI:
+            st.write(f"AI memberi severity **{ticket.get('severity')}**.")
+            reason_choice = st.radio("Alasan penutupan AI sudah benar?", ["Benar", "Perlu koreksi"], index=None, key=f"rv_reason_{tid}")
+            final_verdict = None
+            reason_label = "Alasan penutupan yang benar (wajib bila 'Perlu koreksi'):"
+        else:
+            reason_choice = None
+            final_verdict = st.selectbox("Verdict akhir:", list(VERDICTS), index=None, placeholder="Pilih verdict", key=f"rv_verdict_{tid}")
+            reason_label = "Alasan penutupan:"
+        corrected = st.text_area(reason_label, key=f"rv_text_{tid}")
+        manual_description = st.text_area("Description manual (kosong = pakai teks AI):", key=f"rv_desc_{tid}")
+        manual_recommendations = st.text_area("RECOMMENDATIONS manual (kosong = pakai teks AI):", key=f"rv_recs_{tid}")
+        note = st.text_area("Catatan (opsional):", key=f"rv_note_{tid}")
+        saved = st.form_submit_button("Simpan review")
+
+    if saved:
+        try:
+            changes = review_changes(
+                ticket, reviewer=reviewer, final_severity=final_severity,
+                reason_ok=None if reason_choice is None else reason_choice == "Benar",
+                corrected_reason=corrected, final_verdict=final_verdict, note=note,
+                manual_description=manual_description, manual_recommendations=manual_recommendations,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        try:
+            TICKETS.update(tid, changes)
+        except OSError as exc:
+            st.error(f"Review tidak bisa ditulis ke {TICKETS.path}: {exc}")
+            return
+        st.session_state.participant_code = reviewer.strip()
+        st.rerun()
+
+
 # --- MEMBAGI UI MENJADI TAB ---
 tab_manual, tab_wazuh, tab_scenario, tab_eval, tab_history, tab_defang, tab_shift = st.tabs(
     ["Alert Manual", "Alert Wazuh", "Uji Skenario", "Evaluasi", "History", "Defang", "Shift Summarizer"]
@@ -722,82 +601,86 @@ with tab_manual:
 # TAB: ALERT WAZUH
 # ==========================================
 with tab_wazuh:
-    st.subheader("Alert dari Wazuh")
-    st.markdown("Ambil alert langsung dari Wazuh Indexer, atau unggah berkas ekspor alert. Analisis berjalan dengan mode Blind: AI menilai sendiri dan tidak menerima status dari analis.")
+    wz_view = st.radio("Mode:", ["Tiket otomatis", "Ambil manual"], horizontal=True, key="wz_view")
+    if wz_view == "Tiket otomatis":
+        render_ticket_queue()
+    else:
+        st.subheader("Alert dari Wazuh")
+        st.markdown("Ambil alert langsung dari Wazuh Indexer, atau unggah berkas ekspor alert. Analisis berjalan dengan mode Blind: AI menilai sendiri dan tidak menerima status dari analis.")
 
-    with st.expander("Koneksi Wazuh Indexer", expanded=not st.session_state.get("wazuh_alerts")):
-        st.caption("Alert Wazuh disimpan di Wazuh Indexer (port 9200), bukan di API manager (port 55000). Lab biasanya memakai sertifikat self-signed: isi path root-ca.pem agar verifikasi SSL global tidak perlu dimatikan.")
-        wz_url = st.text_input("URL Wazuh Indexer:", value=ENV_WAZUH.get("url") or "https://localhost:9200", key="wz_url")
-        wz_col1, wz_col2 = st.columns(2)
-        with wz_col1:
-            wz_user = st.text_input("Username Indexer:", value=ENV_WAZUH.get("user") or "", key="wz_user")
-        with wz_col2:
-            wz_pass = st.text_input("Password Indexer:", type="password", value=ENV_WAZUH.get("password") or "", key="wz_pass")
-        wz_ca = st.text_input("Path CA Wazuh (opsional):", placeholder="/path/ke/root-ca.pem", key="wz_ca")
-        wz_c1, wz_c2, wz_c3 = st.columns(3)
-        with wz_c1:
-            wz_level = st.number_input("Level rule minimum:", min_value=0, max_value=15, value=7, key="wz_level")
-        with wz_c2:
-            wz_hours = st.number_input("Jam terakhir:", min_value=1, max_value=720, value=24, key="wz_hours")
-        with wz_c3:
-            wz_size = st.number_input("Jumlah alert maksimum:", min_value=1, max_value=500, value=50, key="wz_size")
-        wz_query = st.text_input("Filter tambahan (query string, opsional):", placeholder="agent.name:web01 AND rule.groups:authentication_failed", key="wz_query")
-        wz_fetch = st.button("Ambil alert dari Wazuh", key="wz_fetch")
+        with st.expander("Koneksi Wazuh Indexer", expanded=not st.session_state.get("wazuh_alerts")):
+            st.caption("Alert Wazuh disimpan di Wazuh Indexer (port 9200), bukan di API manager (port 55000). Lab biasanya memakai sertifikat self-signed: isi path root-ca.pem agar verifikasi SSL global tidak perlu dimatikan.")
+            wz_url = st.text_input("URL Wazuh Indexer:", value=ENV_WAZUH.get("url") or "https://localhost:9200", key="wz_url")
+            wz_col1, wz_col2 = st.columns(2)
+            with wz_col1:
+                wz_user = st.text_input("Username Indexer:", value=ENV_WAZUH.get("user") or "", key="wz_user")
+            with wz_col2:
+                wz_pass = st.text_input("Password Indexer:", type="password", value=ENV_WAZUH.get("password") or "", key="wz_pass")
+            wz_ca = st.text_input("Path CA Wazuh (opsional):", placeholder="/path/ke/root-ca.pem", key="wz_ca")
+            wz_c1, wz_c2, wz_c3 = st.columns(3)
+            with wz_c1:
+                wz_level = st.number_input("Level rule minimum:", min_value=0, max_value=15, value=7, key="wz_level")
+            with wz_c2:
+                wz_hours = st.number_input("Jam terakhir:", min_value=1, max_value=720, value=24, key="wz_hours")
+            with wz_c3:
+                wz_size = st.number_input("Jumlah alert maksimum:", min_value=1, max_value=500, value=50, key="wz_size")
+            wz_query = st.text_input("Filter tambahan (query string, opsional):", placeholder="agent.name:web01 AND rule.groups:authentication_failed", key="wz_query")
+            wz_fetch = st.button("Ambil alert dari Wazuh", key="wz_fetch")
 
-    wz_upload = st.file_uploader("Atau unggah berkas alert (alerts.json, ekspor Discover, array JSON)", type=["json", "ndjson", "log", "txt"], key="wz_upload")
-    wz_load = st.button("Muat alert dari berkas", key="wz_load")
+        wz_upload = st.file_uploader("Atau unggah berkas alert (alerts.json, ekspor Discover, array JSON)", type=["json", "ndjson", "log", "txt"], key="wz_upload")
+        wz_load = st.button("Muat alert dari berkas", key="wz_load")
 
-    if wz_fetch:
-        try:
-            with st.spinner("Mengambil alert dari Wazuh Indexer..."):
-                st.session_state.wazuh_alerts = fetch_alerts(
-                    wz_url, wz_user, wz_pass, verify=(wz_ca.strip() or tls_verify()),
-                    size=wz_size, min_level=wz_level, hours=wz_hours, query=wz_query,
-                )
-            st.session_state.wazuh_source = f"Wazuh Indexer {wz_url}"
-        except WazuhError as exc:
-            st.error(str(exc))
-    if wz_load:
-        if wz_upload is None:
-            st.error("Pilih berkas alert terlebih dahulu.")
-        else:
+        if wz_fetch:
             try:
-                st.session_state.wazuh_alerts = parse_alerts_file(wz_upload.getvalue().decode("utf8", errors="replace"))
-                st.session_state.wazuh_source = f"Berkas {wz_upload.name}"
+                with st.spinner("Mengambil alert dari Wazuh Indexer..."):
+                    st.session_state.wazuh_alerts = fetch_alerts(
+                        wz_url, wz_user, wz_pass, verify=(wz_ca.strip() or tls_verify()),
+                        size=wz_size, min_level=wz_level, hours=wz_hours, query=wz_query,
+                    )
+                st.session_state.wazuh_source = f"Wazuh Indexer {wz_url}"
             except WazuhError as exc:
                 st.error(str(exc))
-
-    wz_alerts = st.session_state.get("wazuh_alerts") or []
-    if st.session_state.get("wazuh_alerts") is not None and not wz_alerts:
-        st.info("Tidak ada alert yang cocok dengan filter. Turunkan level minimum atau perlebar rentang jam.")
-    if wz_alerts:
-        st.caption(f"{len(wz_alerts)} alert dari {st.session_state.get('wazuh_source', '-')}")
-        st.table([{
-            "Waktu": a["timestamp"][:19], "Level": a["rule_level"], "Rule": f"{a['rule_id']} {a['rule_description']}",
-            "Agent": a["agent_name"],
-        } for a in wz_alerts])
-        wz_index = st.selectbox("Pilih alert:", range(len(wz_alerts)), format_func=lambda i: alert_label(wz_alerts[i]), key="wz_pick")
-        chosen = wz_alerts[wz_index]
-        with st.expander("Isi alert (hanya tampil di layar ini)"):
-            st.json(chosen["raw"])
-        wz_ioc = st.text_input("IoC pilihan (kosong = otomatis dari alert):", placeholder="IP, domain, atau hash", key="wz_ioc")
-        if st.button("Analisis alert terpilih", key="wz_analyze"):
-            timer = start_timer()
-            wz_inputs = alert_to_inputs(chosen)
-            res = run_pipeline(
-                alert_name=wz_inputs["alert_name"], ioc_input=wz_ioc, analyst_status=None, action=wz_inputs["action"],
-                related_ip="", raw_text=wz_inputs["raw_text"], analysis_mode=MODE_BLIND, alert_fields=wz_inputs["llm_facts"],
-            )
-            if "error" in res:
-                st.error(res["error"])
+        if wz_load:
+            if wz_upload is None:
+                st.error("Pilih berkas alert terlebih dahulu.")
             else:
-                start_run("wazuh", res, timer, {
-                    "source": "wazuh", "condition": "platform", "alert_name": wz_inputs["alert_name"],
-                    "alert_timestamp": parse_timestamp(chosen["timestamp"]),
-                })
-                add_history(res, "Belum ditentukan")
+                try:
+                    st.session_state.wazuh_alerts = parse_alerts_file(wz_upload.getvalue().decode("utf8", errors="replace"))
+                    st.session_state.wazuh_source = f"Berkas {wz_upload.name}"
+                except WazuhError as exc:
+                    st.error(str(exc))
 
-    show_run("wazuh")
+        wz_alerts = st.session_state.get("wazuh_alerts") or []
+        if st.session_state.get("wazuh_alerts") is not None and not wz_alerts:
+            st.info("Tidak ada alert yang cocok dengan filter. Turunkan level minimum atau perlebar rentang jam.")
+        if wz_alerts:
+            st.caption(f"{len(wz_alerts)} alert dari {st.session_state.get('wazuh_source', '-')}")
+            st.table([{
+                "Waktu": a["timestamp"][:19], "Level": a["rule_level"], "Rule": f"{a['rule_id']} {a['rule_description']}",
+                "Agent": a["agent_name"],
+            } for a in wz_alerts])
+            wz_index = st.selectbox("Pilih alert:", range(len(wz_alerts)), format_func=lambda i: alert_label(wz_alerts[i]), key="wz_pick")
+            chosen = wz_alerts[wz_index]
+            with st.expander("Isi alert (hanya tampil di layar ini)"):
+                st.json(chosen["raw"])
+            wz_ioc = st.text_input("IoC pilihan (kosong = otomatis dari alert):", placeholder="IP, domain, atau hash", key="wz_ioc")
+            if st.button("Analisis alert terpilih", key="wz_analyze"):
+                timer = start_timer()
+                wz_inputs = alert_to_inputs(chosen)
+                res = run_pipeline(
+                    alert_name=wz_inputs["alert_name"], ioc_input=wz_ioc, analyst_status=None, action=wz_inputs["action"],
+                    related_ip="", raw_text=wz_inputs["raw_text"], analysis_mode=MODE_BLIND, alert_fields=wz_inputs["llm_facts"],
+                )
+                if "error" in res:
+                    st.error(res["error"])
+                else:
+                    start_run("wazuh", res, timer, {
+                        "source": "wazuh", "condition": "platform", "alert_name": wz_inputs["alert_name"],
+                        "alert_timestamp": parse_timestamp(chosen["timestamp"]),
+                    })
+                    add_history(res, "Belum ditentukan")
+
+        show_run("wazuh")
 
 # ==========================================
 # TAB: UJI SKENARIO (PEMBANDING MANUAL VS PLATFORM)

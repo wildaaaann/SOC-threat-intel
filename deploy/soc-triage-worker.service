@@ -1,0 +1,24 @@
+[Unit]
+Description=SOC triage worker (alert Wazuh -> CTI -> AI -> tiket)
+After=network-online.target wazuh-indexer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=soc-triage
+Group=soc-triage
+WorkingDirectory=/opt/soc-threat-intel
+EnvironmentFile=/etc/soc-triage/worker.env
+ExecStart=/usr/bin/python3 /opt/soc-threat-intel/worker.py
+Restart=on-failure
+RestartSec=30
+StateDirectory=soc-triage
+# Pembatasan dasar: worker hanya perlu menulis ke /var/lib/soc-triage.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/soc-triage
+
+[Install]
+WantedBy=multi-user.target

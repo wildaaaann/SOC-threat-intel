@@ -89,9 +89,8 @@ def build_query(size=50, min_level=7, hours=24, query=""):
     return {"size": int(size), "sort": [{"timestamp": {"order": "desc"}}], "query": {"bool": bool_query}}
 
 
-def fetch_alerts(base_url, username, password, *, verify=True, size=50, min_level=7, hours=24, query="",
-                 index="wazuh-alerts-*", post=requests.post, timeout=30):
-    """Ambil alert terbaru dari Wazuh Indexer. `verify` boleh True/False atau path berkas CA."""
+def _search(base_url, username, password, body, *, verify, index, post, timeout):
+    """Satu pencarian ke Wazuh Indexer. Kesalahan diubah menjadi WazuhError dengan pesan yang aman ditampilkan."""
     base = _check_base_url(base_url)
     if not username or not password:
         raise WazuhError("Username dan password Wazuh Indexer wajib diisi")
@@ -99,7 +98,7 @@ def fetch_alerts(base_url, username, password, *, verify=True, size=50, min_leve
         response = post(
             f"{base}/{index}/_search",
             auth=(username, password),
-            json=build_query(size, min_level, hours, query),
+            json=body,
             headers={"Content-Type": "application/json"},
             timeout=timeout,
             verify=verify,
@@ -127,6 +126,33 @@ def fetch_alerts(base_url, username, password, *, verify=True, size=50, min_leve
     except (KeyError, TypeError, ValueError):
         raise WazuhError("Format jawaban Wazuh Indexer tidak dikenali (tidak ada hits.hits)")
     return [normalize_alert(hit) for hit in hits]
+
+
+def fetch_alerts(base_url, username, password, *, verify=True, size=50, min_level=7, hours=24, query="",
+                 index="wazuh-alerts-*", post=requests.post, timeout=30):
+    """Ambil alert terbaru dari Wazuh Indexer. `verify` boleh True/False atau path berkas CA."""
+    return _search(base_url, username, password, build_query(size, min_level, hours, query),
+                   verify=verify, index=index, post=post, timeout=timeout)
+
+
+def build_query_since(since, min_level=7, size=20):
+    """Alert sejak `since` (datetime UTC), terlama dulu, supaya antrean diproses berurutan dan kursor bisa maju bertahap."""
+    stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return {
+        "size": int(size),
+        "sort": [{"timestamp": {"order": "asc"}}],
+        "query": {"bool": {"filter": [
+            {"range": {"rule.level": {"gte": int(min_level)}}},
+            {"range": {"timestamp": {"gte": stamp}}},
+        ]}},
+    }
+
+
+def fetch_alerts_since(base_url, username, password, since, *, verify=True, min_level=7, size=20,
+                       index="wazuh-alerts-*", post=requests.post, timeout=30):
+    """Alert baru sejak `since`. Dipakai worker; deduplikasi berdasarkan id alert dilakukan pemanggil."""
+    return _search(base_url, username, password, build_query_since(since, min_level, size),
+                   verify=verify, index=index, post=post, timeout=timeout)
 
 
 def parse_alerts_file(text):
@@ -225,3 +251,76 @@ def alert_to_inputs(alert):
     if alert.get("rule_id"):
         name = f"{name} (rule {alert['rule_id']})"
     return {"alert_name": name, "raw_text": raw_text, "llm_facts": facts, "action": ""}
+
+
+# Kolom alert yang menjadi entitas bagi pembaca manusia. Ini hanya tampil di layar; hanya LLM_SAFE_FIELDS yang ke LLM.
+_ENTITY_FIELDS = (
+    ("data.srcip", "ip", "Sumber"),
+    ("data.dstip", "ip", "Tujuan"),
+    ("data.srcuser", "user", "Pengguna sumber"),
+    ("data.dstuser", "user", "Pengguna tujuan"),
+    ("data.win.eventdata.targetUserName", "user", "Pengguna target"),
+    ("data.win.eventdata.subjectUserName", "user", "Pengguna subjek"),
+    ("data.url", "url", "URL"),
+    ("syscheck.path", "file", "Berkas"),
+    ("syscheck.md5_after", "md5", "Hash berkas"),
+    ("syscheck.sha1_after", "sha1", "Hash berkas"),
+    ("syscheck.sha256_after", "sha256", "Hash berkas"),
+)
+
+
+def _ip_is_public(value):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return None
+
+
+def extract_entities(alert):
+    """Entitas alert untuk ditampilkan: rule, agent, kolom penting, dan IoC dari isi log.
+
+    Mengembalikan list {"type", "value", "role", "field", "public"}. `field` adalah nama kolom di SIEM
+    (rule.id, agent.name, data.srcip, ...) supaya analis bisa mencocokkan dengan tampilan Wazuh Dashboard;
+    `public` hanya bermakna untuk IP.
+    """
+    from ioc_extract import extract_iocs
+
+    found, seen = [], {}
+
+    def add(kind, value, role, field, public=None):
+        value = str(value or "").strip()
+        if not value:
+            return
+        key = (kind, value.lower())
+        if key in seen:
+            # Nilai yang sama di beberapa kolom SIEM tetap satu baris, tetapi semua nama kolomnya dicatat.
+            row = seen[key]
+            if field not in row["field"].split(", "):
+                row["field"] += f", {field}"
+            if role not in row["role"].split(" / ") and role != "Dari log":
+                row["role"] += f" / {role}"
+            return
+        row = {"type": kind, "value": value, "role": role, "field": field, "public": public}
+        seen[key] = row
+        found.append(row)
+
+    rule = f"{alert.get('rule_id', '')} {alert.get('rule_description', '')}".strip()
+    add("rule", rule, "Rule", "rule.id / rule.description")
+    add("host", alert.get("agent_name"), "Agent", "agent.name")
+    agent_ip = alert.get("agent_ip")
+    add("ip", agent_ip, "IP agent", "agent.ip", _ip_is_public(agent_ip) if agent_ip else None)
+
+    raw = alert.get("raw") or {}
+    for dotted, kind, role in _ENTITY_FIELDS:
+        value = _get(raw, dotted)
+        if value in (None, "", []):
+            continue
+        add(kind, value, role, dotted, _ip_is_public(str(value)) if kind == "ip" else None)
+
+    text_values = []
+    _flatten_values(alert.get("data", {}), text_values)
+    text = "\n".join([alert.get("full_log", "")] + text_values)
+    for ioc in extract_iocs(text):
+        add(ioc["type"], ioc["value"], "Dari log", "full_log / data.*", ioc["public"] if ioc["type"] == "ip" else None)
+    return found
