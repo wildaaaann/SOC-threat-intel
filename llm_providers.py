@@ -100,3 +100,19 @@ def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post):
         log.append(entry)
         return text, attempt, log
     return None, None, log
+
+
+def gemini_generate(prompt, key, model, verify=True):
+    """Satu panggilan Gemini. `verify` False hanya bila analis mematikan verifikasi SSL di sidebar."""
+    from google import genai
+    from google.genai import types
+
+    if verify:
+        client = genai.Client(api_key=key)
+    else:
+        import ssl
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(client_args={'verify': context}))
+    return client.models.generate_content(model=model, contents=prompt).text

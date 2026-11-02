@@ -8,7 +8,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wazuh_client import (  # noqa: E402
-    WazuhError, alert_label, alert_to_inputs, build_query, fetch_alerts, normalize_alert, parse_alerts_file, parse_timestamp,
+    WazuhError, alert_label, alert_to_inputs, build_query, extract_entities, fetch_alerts, normalize_alert, parse_alerts_file, parse_timestamp,
 )
 
 NESTED = {
@@ -91,6 +91,28 @@ class InputsTests(unittest.TestCase):
     def test_empty_fields_skipped(self):
         facts = alert_to_inputs(normalize_alert({"rule": {"id": "1"}}))["llm_facts"]
         self.assertEqual(facts, ["Rule ID: 1"])
+
+
+class EntityTests(unittest.TestCase):
+    def setUp(self):
+        self.entities = extract_entities(normalize_alert(NESTED))
+
+    def test_every_entity_carries_its_siem_field(self):
+        for e in self.entities:
+            self.assertTrue(e["field"], e)
+
+    def test_siem_field_names_match_wazuh_dashboard(self):
+        by_field = {e["field"]: e["value"] for e in self.entities}
+        self.assertEqual(by_field["agent.name"], "WS-014-INTERNAL")
+        merged = next(v for f, v in by_field.items() if f.startswith("agent.ip"))
+        self.assertEqual(merged, "10.20.1.15")
+        self.assertIn("data.srcip", next(f for f in by_field if f.startswith("agent.ip")))
+        self.assertEqual(by_field["data.url"], "http://evil.example.com/a.php")
+        self.assertIn("rule.id / rule.description", by_field)
+
+    def test_ioc_found_only_in_log_is_labelled_as_log(self):
+        row = next(e for e in self.entities if e["value"] == "203.0.113.9")
+        self.assertEqual((row["role"], row["field"]), ("Dari log", "full_log / data.*"))
 
 
 class FetchTests(unittest.TestCase):

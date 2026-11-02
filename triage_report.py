@@ -55,3 +55,67 @@ def layers_complete(report_text):
 def layers_status(report_text):
     """{"fakta": bool, "pengayaan": bool, "inferensi": bool}: lapisan ada dan tidak kosong."""
     return {name: bool(body) for name, body in parse_layers(report_text).items()}
+
+
+# --- Severity, alasan penutupan, deskripsi, dan rekomendasi (dibaca dari laporan AI) ---
+
+SEVERITIES = ("Low", "Medium", "High", "Critical")
+_SEVERITY_CANON = {s.lower(): s for s in SEVERITIES}
+
+# Label baris pada LAYER 3. Dipakai untuk menentukan di mana isi satu label berakhir.
+_FIELD_LABELS = ("Conclusion", "Severity", "Closing Reason", "Description", "Basis", "Uncertainty")
+_LABEL_LINE = re.compile(r"^[ \t]*[*#_`]*\s*(" + "|".join(re.escape(l) for l in _FIELD_LABELS) + r")[*_`]*\s*[:\-–—]\s*(.*)$", re.IGNORECASE)
+
+# "Severity: [Low|Medium|High|Critical]" (sisa templat) ditolak, seperti pada verdict.
+_SEVERITY = re.compile(
+    r"severity[\s*_`]*[:\-–—][\s*_`\"'\[(]*(low|medium|high|critical)(?![A-Za-z])(?!\s*\|)",
+    re.IGNORECASE,
+)
+
+
+def parse_severity(report_text):
+    """Severity dari baris Severity, atau 'Tidak terbaca' bila formatnya tidak ditemukan."""
+    for match in _SEVERITY.finditer(report_text or ""):
+        return _SEVERITY_CANON[match.group(1).lower()]
+    return UNREADABLE
+
+
+def parse_field(report_text, label):
+    """Isi satu label LAYER 3 (boleh beberapa baris). String kosong bila label tidak ada atau hanya sisa templat."""
+    wanted = label.lower()
+    lines = (report_text or "").splitlines()
+    collected, inside = [], False
+    for line in lines:
+        labelled = _LABEL_LINE.match(line)
+        if labelled and labelled.group(1).lower() == wanted:
+            inside = True
+            collected = [labelled.group(2).strip()]
+            continue
+        if inside:
+            if labelled or _HEADING.match(line):
+                break
+            collected.append(line.strip())
+    text = "\n".join(collected).strip()
+    # Sisa templat seperti "[One or two sentences for the human reviewer]" bukan isi sungguhan.
+    if re.fullmatch(r"\[[^\]]*\]", text):
+        return ""
+    return text
+
+
+def parse_closing_reason(report_text):
+    return parse_field(report_text, "Closing Reason")
+
+
+def parse_description(report_text):
+    return parse_field(report_text, "Description")
+
+
+def parse_recommendations(report_text):
+    """Isi bagian bernomor 'RECOMMENDATIONS', atau string kosong."""
+    text = report_text or ""
+    headings = list(_HEADING.finditer(text))
+    for index, heading in enumerate(headings):
+        if "RECOMMENDATIONS" in heading.group(2).upper():
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            return text[heading.end():end].strip()
+    return ""

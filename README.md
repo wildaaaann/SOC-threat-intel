@@ -28,3 +28,12 @@ To run this application, you will need the following API Keys:
    ```bash
    git clone [https://github.com/](https://github.com/)wildaaaann/SOC-threat-intel.git
    cd SOC-threat-intel
+
+## Mode Otomatis (tab "Alert Wazuh" > "Tiket otomatis")
+
+Worker (`worker.py`) membaca alert level 7 ke atas dari Wazuh Indexer, memperkaya IoC publik lewat CTI, meminta AI menyusun laporan, lalu menyimpan satu tiket per alert di `data/tickets.jsonl`. Tab menampilkan setiap tiket dengan empat kolom (Severity, Reason untuk closing, Description, RECOMMENDATIONS) sebagai **AI** dan sebagai **Manual** (nilai akhir reviewer), dan entities memakai nama field SIEM (`agent.name`, `data.srcip`, ...).
+
+- AI hanya menutup tiket bila CTI berhasil dan laporan lengkap serta konsisten. Selain itu tiket berstatus "Perlu manusia". True Positive dan severity High/Critical tetap ditutup AI tetapi wajib direview.
+- Alert tanpa IoC publik (IP, domain, hash) tidak bisa diperkaya, jadi menjadi "Perlu manusia". Pada log yang didominasi IP internal, ini bisa jadi sebagian besar tiket.
+- Jalankan: `python3 worker.py` (satu putaran saja: `--once`). Untuk server Wazuh, pakai `deploy/soc-triage-worker.service` dan `deploy/worker.env.example`. Aplikasi dan worker harus memakai folder data yang sama (`TICKETS_PATH`).
+- Belum diuji terhadap Wazuh sungguhan, hanya terhadap Indexer palsu.

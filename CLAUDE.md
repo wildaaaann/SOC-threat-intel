@@ -16,12 +16,14 @@ Each one protects the validity of the thesis results.
 - Raw alert text and Wazuh identity fields (agent, location, `full_log`) never reach any LLM provider. Only the extracted IoCs, the alert name, the action text, the CTI results, and the `LLM_SAFE_FIELDS` listed in `wazuh_client.py` do.
 - Every LLM call goes through `run_chain` (`llm_providers.py`). Each trial stores `llm_provider`, `llm_model`, and whether a fallback ran. Compute accuracy per provider and model, never pooled: a fallback run is a different model.
 - MTTR is `decision time - alert loaded into the platform`, measured with a monotonic clock. `system_latency_s` (CTI + AI wait) is stored separately so the thesis can report MTTR with or without it.
+- **Mode Otomatis** (`worker.py`, `ticket_policy.py`) is separate from the thesis experiment: its tickets never enter `data/trials.jsonl` or the accuracy and MTTR numbers. It closes a ticket only through `ticket_policy.decide`; a failed VirusTotal lookup, a missing layer, an unreadable verdict or severity, or a verdict/severity contradiction holds the ticket as "Perlu manusia". True Positive and High/Critical closures stay mandatory-review. Never loosen `decide` to raise the auto-close rate.
+- Tickets keep the AI's four fields (`severity`, `closing_reason`, `description`, `recommendations`) apart from the reviewer's (`final_*`). A review never overwrites the AI value, because agreement between the two is a result the thesis reports.
 - Trials live in `data/trials.jsonl` (`TrialStore`, append-only, gitignored). Rubric scores are `_update` lines merged on read. Never commit `data/`.
 
 ## Gotchas
 
 - `app.py` uses CRLF line endings. Keep them; a whole-file diff hides the real change.
-- The report template (`SOC_ANALYST_ROLE` in `app.py`) and `triage_report.py` change together: the `Conclusion:` line, the `LAYER 1/2/3` headings, and `parse_ai_verdict` / `parse_layers`. Run `tests/test_triage_report.py` after either side changes.
+- The report template (`SOC_ANALYST_ROLE` in `triage_prompt.py`) and `triage_report.py` change together: the `Conclusion:`, `Severity:`, `Closing Reason:` and `Description:` lines, the `LAYER 1/2/3` and `RECOMMENDATIONS` headings, and the parsers (`parse_ai_verdict`, `parse_layers`, `parse_severity`, ...). Run `tests/test_triage_report.py` and `tests/test_tickets.py` after either side changes.
 - `RESPONSE_ACTIONS` (`scenarios.py`) and the three starter scenarios are drafts, and the scenarios are synthetic with `validated: false`. Replace them once the supervisor or mentor agrees on the definitions and answer keys.
 - The Wazuh tab reads the Wazuh Indexer (`wazuh-alerts-*`, port 9200), not the manager REST API. It has only been tested against fake responses, never a live Wazuh.
 - Behind an SSL-inspecting proxy, verification fails with `CERTIFICATE_VERIFY_FAILED`. Point `REQUESTS_CA_BUNDLE` (requests) and `SSL_CERT_FILE` (Gemini via httpx) at the corporate CA, or untick the sidebar checkbox. A lab Wazuh Indexer usually needs its own `root-ca.pem` in the tab's CA field.
@@ -31,4 +33,8 @@ Each one protects the validity of the thesis results.
 - Gemini's unpaid tier may use submitted content to improve Google products (terms: ai.google.dev/gemini-api/terms). Treat every free tier as public.
 - The History tab lives in `st.session_state` and is erased by a refresh. Trials in `data/` survive, except on hosts with a temporary disk (Streamlit Cloud): download the JSONL regularly.
 - Set `EVALUATOR_PIN` in secrets before testing with analysts; without it a checkbox reveals the answer keys.
+- The worker has only run against a fake Indexer, never a live Wazuh. Timestamps are queried as UTC `...Z`; confirm against a real index.
+- One alert costs 3-4 VirusTotal requests. `worker.py` spaces them (`VT_MIN_INTERVAL_S`) and caches successful lookups for 24 h (`CtiCache`); the free quota is the limit on alert rate, and a backlog shows in the Wazuh tab.
+- Alerts with no public IoC cannot be enriched and become "Perlu manusia". Expect many on internal-heavy logs.
+- `extract_entities` merges one value found in several SIEM fields into a single row whose `field` lists all of them; the entity table is for the reader and never goes to an LLM.
 - `ioc_utils.py` duplicates `ioc_extract.py` and `app.py` does not import it. Keep one.
