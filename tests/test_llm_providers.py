@@ -8,9 +8,10 @@ from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attem
 
 
 class FakeResp:
-    def __init__(self, status=200, payload=None):
+    def __init__(self, status=200, payload=None, text=""):
         self.status_code = status
         self._payload = payload if payload is not None else {}
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -88,8 +89,8 @@ class ChainTests(unittest.TestCase):
         self.assertNotIn("SECRETKEY", str(log))
 
     def test_all_fail_returns_none_with_full_log(self):
-        post = make_post([FakeResp(500), RuntimeError("timeout")])
-        text, used, log = run_chain("p", build_attempts("", EXTRA), None, post=post)
+        post = make_post([FakeResp(500), FakeResp(500), RuntimeError("timeout"), RuntimeError("timeout")])
+        text, used, log = run_chain("p", build_attempts("", EXTRA), None, post=post, retry_wait=0, sleep=lambda s: None)
         self.assertIsNone(text)
         self.assertIsNone(used)
         self.assertEqual(len(log), 2)
@@ -144,6 +145,61 @@ class ModelAvailabilityTests(unittest.TestCase):
         self.assertIn("401", str(ctx.exception))
         with self.assertRaises(LLMError):
             list_models("Nope", "k")
+
+
+class DiagnosticsAndRetryTests(unittest.TestCase):
+    NO_WAIT = {"retry_wait": 0, "sleep": lambda s: None}
+
+    def test_provider_error_message_is_shown_without_the_key(self):
+        resp = FakeResp(400, {"error": {"message": "model requires terms acceptance"}})
+        _, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "SECRETKEY"}}), None, post=make_post([resp]), **self.NO_WAIT)
+        self.assertIn("HTTP 400", log[0]["Detail"])
+        self.assertIn("terms acceptance", log[0]["Detail"])
+        self.assertNotIn("SECRETKEY", str(log))
+
+    def test_error_without_json_falls_back_to_text(self):
+        resp = FakeResp(400, text="plain failure")
+        resp.json = lambda: (_ for _ in ()).throw(ValueError("no json"))
+        _, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "k"}}), None, post=make_post([resp]), **self.NO_WAIT)
+        self.assertIn("plain failure", log[0]["Detail"])
+
+    def test_gemini_503_is_retried_once_then_succeeds(self):
+        calls = []
+
+        def flaky(p, k, m):
+            calls.append(m)
+            if len(calls) == 1:
+                raise RuntimeError("503 UNAVAILABLE. high demand")
+            return "laporan"
+        text, used, log = run_chain("p", build_attempts("gem", {}), flaky, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], len(calls), log[0]["Status"]), ("laporan", "Gemini", 2, "OK"))
+        self.assertIn("1x ulang", log[0]["Detail"])
+
+    def test_persistent_503_falls_through_after_one_retry_only(self):
+        calls = []
+
+        def down(p, k, m):
+            calls.append(1)
+            raise RuntimeError("503 UNAVAILABLE")
+        post = make_post([ok("dari groq")])
+        text, used, log = run_chain("p", build_attempts("gem", {"Groq": {"key": "g"}}), down, post=post, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], len(calls)), ("dari groq", "Groq", 2))
+        self.assertIn("sudah diulang 1x", log[0]["Detail"])
+
+    def test_permanent_errors_are_not_retried(self):
+        for message in ("404 NOT_FOUND model gone", "API key ditolak (HTTP 401)", "HTTP 400: bad request"):
+            calls = []
+
+            def fail(p, k, m, message=message):
+                calls.append(1)
+                raise RuntimeError(message)
+            run_chain("p", build_attempts("gem", {}), fail, **self.NO_WAIT)
+            self.assertEqual(len(calls), 1, message)
+
+    def test_http_503_from_openai_compatible_is_retried(self):
+        post = make_post([FakeResp(503, {"error": {"message": "overloaded"}}), ok("pulih")])
+        text, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "g"}}), None, post=post, **self.NO_WAIT)
+        self.assertEqual((text, len(post.calls)), ("pulih", 2))
 
 
 if __name__ == "__main__":

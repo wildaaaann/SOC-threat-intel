@@ -6,6 +6,7 @@ respons kosong) -> lanjut ke penyedia berikutnya. Setiap percobaan dicatat di lo
 """
 
 import re
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -52,6 +53,23 @@ def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
     return attempts if fallback else attempts[:1]
 
 
+def _error_message(response):
+    """Pesan error dari badan respons penyedia (mis. 'model requires terms acceptance'), dipotong. Badan error
+    penyedia tidak memuat API key kita; key hanya ada di header request yang tidak dibaca di sini."""
+    try:
+        body = response.json()
+        err = body.get("error") if isinstance(body, dict) else None
+        message = err.get("message") if isinstance(err, dict) else (err or None)
+    except Exception:
+        message = None
+    message = message or getattr(response, "text", "") or "tanpa pesan"
+    return " ".join(str(message).split())[:160]
+
+
+# Error sementara (lonjakan permintaan, server sibuk, timeout): satu kali ulang pada model yang sama cukup.
+_TRANSIENT = re.compile(r"\b(500|502|503|504)\b|UNAVAILABLE|high demand|timed out|timeout", re.IGNORECASE)
+
+
 def call_openai_compatible(prompt, attempt, verify, post=requests.post, timeout=60):
     response = post(
         attempt["base_url"] + "/chat/completions",
@@ -67,7 +85,8 @@ def call_openai_compatible(prompt, attempt, verify, post=requests.post, timeout=
         raise LLMError(f"API key ditolak (HTTP {status})")
     if status in (404, 410):
         raise LLMError(f"Model '{attempt['model']}' tidak tersedia (HTTP {status}); kemungkinan sudah dipensiunkan. Klik 'Cek model yang tersedia' di sidebar lalu ganti nama modelnya")
-    response.raise_for_status()
+    if status >= 400:
+        raise LLMError(f"HTTP {status}: {_error_message(response)}")
     try:
         body = response.json()
         text = body["choices"][0]["message"]["content"] or ""
@@ -82,7 +101,7 @@ def call_openai_compatible(prompt, attempt, verify, post=requests.post, timeout=
     return text
 
 
-def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post):
+def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post, retry_wait=3.0, sleep=time.sleep):
     """Coba tiap penyedia berurutan.
 
     Mengembalikan (teks, attempt_yang_berhasil, log). Jika semua gagal: (None, None, log).
@@ -95,18 +114,29 @@ def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post):
             "Model": attempt["model"],
             "Waktu (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         }
-        try:
+        def call_once():
             if attempt["kind"] == "gemini":
-                text = gemini_fn(prompt, attempt["key"], attempt["model"])
-                if not text or not str(text).strip():
+                out = gemini_fn(prompt, attempt["key"], attempt["model"])
+                if not out or not str(out).strip():
                     raise LLMError("Respons kosong")
-            else:
-                text = call_openai_compatible(prompt, attempt, verify, post=post)
+                return out
+            return call_openai_compatible(prompt, attempt, verify, post=post)
+
+        retried = False
+        try:
+            try:
+                text = call_once()
+            except Exception as first:
+                if not _TRANSIENT.search(str(first)):
+                    raise
+                retried = True
+                sleep(retry_wait)
+                text = call_once()
         except Exception as exc:
-            entry.update({"Status": "Gagal", "Detail": str(exc)[:200]})
+            entry.update({"Status": "Gagal", "Detail": (str(exc)[:200] + (" (sudah diulang 1x)" if retried else ""))})
             log.append(entry)
             continue
-        entry.update({"Status": "OK", "Detail": ""})
+        entry.update({"Status": "OK", "Detail": "berhasil setelah 1x ulang" if retried else ""})
         if attempt.get("served_model"):
             attempt = dict(attempt, model=f"{attempt['model']} -> {attempt['served_model']}")
             entry["Model"] = attempt["model"]

@@ -158,7 +158,8 @@ class WorkerTests(unittest.TestCase):
 
     def test_all_llm_down_is_held(self):
         self.llm = FakeLLM(status=500)
-        self.cycle([make_alert("a5", "2026-10-30T01:59:00.000+0000")])
+        with mock.patch("llm_providers.time.sleep"):  # HTTP 500 diulang sekali; jangan menunggu sungguhan di tes
+            self.cycle([make_alert("a5", "2026-10-30T01:59:00.000+0000")])
         (t,) = self.store.all()
         self.assertEqual(t["status"], STATUS_NEEDS_HUMAN)
         self.assertIn("Semua penyedia AI gagal", t["hold_reasons"])
