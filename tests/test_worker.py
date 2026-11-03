@@ -261,7 +261,9 @@ class ConfigTests(unittest.TestCase):
 
     def test_gemini_alone_is_enough(self):
         env = {k: v for k, v in self.BASE.items() if k != "GROQ_API_KEY"}
-        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x")).gemini_key, "x")
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x")).gemini_key, ["x"])
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x", GEMINI_API_KEY_2="y")).gemini_key, ["x", "y"])
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY_2="y")).gemini_key, ["y"])
 
 
 if __name__ == "__main__":

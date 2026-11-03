@@ -202,5 +202,39 @@ class DiagnosticsAndRetryTests(unittest.TestCase):
         self.assertEqual((text, len(post.calls)), ("pulih", 2))
 
 
+class MultiGeminiKeyTests(unittest.TestCase):
+    NO_WAIT = {"retry_wait": 0, "sleep": lambda s: None}
+
+    def test_two_keys_become_two_gemini_attempts_in_order_with_slots(self):
+        attempts = build_attempts(["k1", "k2"], {})
+        self.assertEqual([(a["provider"], a["key"], a["slot"], a["model"]) for a in attempts],
+                         [("Gemini", "k1", "#1", GEMINI_MODEL), ("Gemini", "k2", "#2", GEMINI_MODEL)])
+
+    def test_blank_and_duplicate_keys_are_dropped(self):
+        self.assertEqual([a["key"] for a in build_attempts(["", "k1", "k1", None], {})], ["k1"])
+        self.assertEqual(build_attempts(["", ""], {}), [])
+
+    def test_quota_on_first_key_falls_to_second_key_with_same_model(self):
+        used_keys = []
+
+        def gem(p, k, m):
+            used_keys.append(k)
+            if k == "k1":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED")
+            return "laporan"
+        text, used, log = run_chain("p", build_attempts(["k1", "k2"], EXTRA), gem, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], used["model"], used["slot"], used_keys), ("laporan", "Gemini", GEMINI_MODEL, "#2", ["k1", "k2"]))
+        self.assertEqual([(r["Kunci"], r["Status"]) for r in log], [("#1", "Gagal"), ("#2", "OK")])
+        self.assertNotIn("k1", str(log))
+
+    def test_no_fallback_still_rotates_gemini_keys_but_never_switches_provider(self):
+        attempts = build_attempts(["k1", "k2"], EXTRA, fallback=False)
+        self.assertEqual([a["provider"] for a in attempts], ["Gemini", "Gemini"])
+        self.assertEqual(len(build_attempts("k1", EXTRA, fallback=False)), 1)
+
+    def test_single_string_key_still_works(self):
+        self.assertEqual([a["slot"] for a in build_attempts("gem", {})], ["#1"])
+
+
 if __name__ == "__main__":
     unittest.main()

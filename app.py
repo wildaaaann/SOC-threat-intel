@@ -44,6 +44,7 @@ st.markdown("Automation gathering threat Inteligence and report @wildaaan.")
 
 # --- AMBIL DATA DARI STREAMLIT SECRETS (Dengan Penanganan Error Lanjutan) ---
 ENV_GEMINI = ""
+ENV_GEMINI2 = ""
 ENV_VT = ""
 ENV_ABUSE = ""
 ENV_URLSCAN = ""
@@ -54,6 +55,7 @@ ENV_EVAL_PIN = ""
 
 try:
     ENV_GEMINI = st.secrets.get("GEMINI_API_KEY", "")
+    ENV_GEMINI2 = st.secrets.get("GEMINI_API_KEY_2", "")
     ENV_VT = st.secrets.get("VT_API_KEY", "")
     ENV_ABUSE = st.secrets.get("ABUSEIPDB_API_KEY", "")
     ENV_URLSCAN = st.secrets.get("URLSCAN_API_KEY", "")
@@ -87,6 +89,7 @@ def secret_input(label, server_value, key=None, container=st.sidebar):
 st.sidebar.header("Konfigurasi API")
 st.sidebar.caption("Key yang sudah diatur di server tidak ditampilkan. Biarkan kolom kosong untuk memakainya, atau tempel key sendiri untuk sesi ini saja.")
 gemini_key = secret_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", ENV_GEMINI)
+gemini_key2 = secret_input("Gemini API Key #2 (Opsional, akun lain: dicoba bila key pertama gagal)", ENV_GEMINI2)
 gemini_model = st.sidebar.text_input("Model Gemini", value=GEMINI_MODEL, key="gemini_model")
 with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
     st.caption("Dipakai berurutan bila penyedia sebelumnya gagal (batas gratis habis, server sibuk). Kosongkan key untuk melewati penyedia.")
@@ -162,7 +165,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
     """Pengayaan CTI lalu laporan AI. Mengembalikan dict hasil, atau {"error": pesan} bila masukan belum lengkap."""
     if analysis_mode == MODE_ASSISTED and analyst_status is None:
         return {"error": "Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind."}
-    if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra, gemini_model=gemini_model):
+    if not vt_key or not abuse_key or not build_attempts([gemini_key, gemini_key2], llm_extra, gemini_model=gemini_model):
         return {"error": "Harap masukkan VirusTotal, AbuseIPDB, dan minimal satu API Key AI (Gemini atau penyedia cadangan) di menu Sidebar terlebih dahulu."}
 
     verify = tls_verify()
@@ -178,7 +181,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
         return ctx
 
     with st.spinner("2/2: Menghasilkan Laporan Akhir dengan AI..."):
-        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback, gemini_model=gemini_model), gemini_call, verify)
+        gen = generate_report(ctx, build_attempts([gemini_key, gemini_key2], llm_extra, llm_fallback, gemini_model=gemini_model), gemini_call, verify)
 
     # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
     is_blind = analysis_mode == MODE_BLIND

@@ -14,7 +14,7 @@ import requests
 # Semua penyedia ini memakai format OpenAI `/chat/completions`. Gemini dipanggil lewat `gemini_fn` dari app.
 # Nama model hanya nilai awal dan bisa diubah di sidebar: katalog model gratis sering berganti.
 OPENAI_COMPATIBLE = {
-    "NVIDIA NIM": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b"},
+    "NVIDIA NIM": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "mistralai/mistral-large-4-1t-a52b"},
     "Groq": {"base_url": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-120b"},
     # "openrouter/free" memilih sendiri satu model gratis yang sedang tersedia. Model yang benar-benar menjawab
     # dicatat dari respons (lihat run_chain), karena akurasi harus dihitung per model.
@@ -35,11 +35,19 @@ def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
     """Susun urutan percobaan.
 
     `extra` = {nama_penyedia: {"key": ..., "model": ...}}. Penyedia tanpa key dilewati.
-    Gemini selalu pertama bila key-nya ada. Jika `fallback` False, hanya penyedia pertama yang dipakai.
+    `gemini_key` boleh satu string atau daftar key (mis. dari dua akun). Tiap key menjadi satu percobaan Gemini
+    berurutan; semuanya tetap penyedia "Gemini" dengan model yang sama, jadi akurasinya sah digabung.
+    Gemini selalu pertama. Jika `fallback` False, hanya penyedia dan model pertama yang dipakai, termasuk semua
+    key-nya, karena memutar key tidak mengganti model.
     """
     attempts = []
-    if gemini_key:
-        attempts.append({"provider": "Gemini", "model": (gemini_model or GEMINI_MODEL).strip(), "key": gemini_key, "kind": "gemini"})
+    keys = [gemini_key] if isinstance(gemini_key, str) else list(gemini_key or [])
+    seen_keys = []
+    for key in keys:
+        if key and key not in seen_keys:
+            seen_keys.append(key)
+    for slot, key in enumerate(seen_keys, 1):
+        attempts.append({"provider": "Gemini", "model": (gemini_model or GEMINI_MODEL).strip(), "key": key, "kind": "gemini", "slot": f"#{slot}"})
     for name, cfg in OPENAI_COMPATIBLE.items():
         entry = (extra or {}).get(name) or {}
         if entry.get("key"):
@@ -50,7 +58,10 @@ def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
                 "kind": "openai",
                 "base_url": cfg["base_url"],
             })
-    return attempts if fallback else attempts[:1]
+    if fallback or not attempts:
+        return attempts
+    first = attempts[0]
+    return [a for a in attempts if (a["provider"], a["model"]) == (first["provider"], first["model"])]
 
 
 def _error_message(response):
@@ -112,6 +123,7 @@ def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post, retr
         entry = {
             "Penyedia": attempt["provider"],
             "Model": attempt["model"],
+            "Kunci": attempt.get("slot", ""),
             "Waktu (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         }
         def call_once():

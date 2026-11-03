@@ -53,7 +53,7 @@ class Config:
     cache_ttl_s: int = 86400
     vt_interval_s: float = 16.0
     keys: dict = field(default_factory=dict)
-    gemini_key: str = ""
+    gemini_key: object = ()  # daftar key Gemini yang terisi (satu atau dua akun)
     gemini_model: str = ""
     llm_extra: dict = field(default_factory=dict)
     llm_fallback: bool = True
@@ -67,7 +67,7 @@ def load_config(env):
         name: {"key": env.get(var, ""), "model": env.get(f"{var.split('_')[0]}_MODEL", "")}
         for name, var in (("NVIDIA NIM", "NVIDIA_API_KEY"), ("Groq", "GROQ_API_KEY"), ("OpenRouter", "OPENROUTER_API_KEY"))
     }
-    if not env.get("GEMINI_API_KEY") and not any(v["key"] for v in llm_extra.values()):
+    if not (env.get("GEMINI_API_KEY") or env.get("GEMINI_API_KEY_2")) and not any(v["key"] for v in llm_extra.values()):
         missing.append("minimal satu key AI (GEMINI_API_KEY, NVIDIA_API_KEY, GROQ_API_KEY, atau OPENROUTER_API_KEY)")
     if missing:
         raise ValueError("Konfigurasi belum lengkap: " + ", ".join(missing))
@@ -89,7 +89,7 @@ def load_config(env):
         vt_interval_s=float(env.get("VT_MIN_INTERVAL_S", "16")),
         keys={"vt": env["VT_API_KEY"], "abuse": env.get("ABUSEIPDB_API_KEY", ""),
               "urlscan": env.get("URLSCAN_API_KEY", ""), "hybrid": env.get("HYBRID_API_KEY", "")},
-        gemini_key=env.get("GEMINI_API_KEY", ""), gemini_model=env.get("GEMINI_MODEL", ""), llm_extra=llm_extra,
+        gemini_key=[k for k in (env.get("GEMINI_API_KEY", ""), env.get("GEMINI_API_KEY_2", "")) if k], gemini_model=env.get("GEMINI_MODEL", ""), llm_extra=llm_extra,
         llm_fallback=env.get("WORKER_LLM_FALLBACK", "true").lower() in _TRUE,
     )
     cfg.cache = cti.CtiCache(cfg.cache_path, cfg.cache_ttl_s)
