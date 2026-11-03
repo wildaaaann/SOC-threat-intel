@@ -101,7 +101,7 @@ def call_openai_compatible(prompt, attempt, verify, post=requests.post, timeout=
     return text
 
 
-def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post, retry_wait=3.0, sleep=time.sleep):
+def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post, retry_wait=3.0, sleep=None):
     """Coba tiap penyedia berurutan.
 
     Mengembalikan (teks, attempt_yang_berhasil, log). Jika semua gagal: (None, None, log).
@@ -130,7 +130,7 @@ def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post, retr
                 if not _TRANSIENT.search(str(first)):
                     raise
                 retried = True
-                sleep(retry_wait)
+                (sleep or time.sleep)(retry_wait)
                 text = call_once()
         except Exception as exc:
             entry.update({"Status": "Gagal", "Detail": (str(exc)[:200] + (" (sudah diulang 1x)" if retried else ""))})
