@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from llm_providers import build_attempts, run_chain  # noqa: E402
+from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attempts, list_models, run_chain  # noqa: E402
 
 
 class FakeResp:
@@ -51,7 +51,7 @@ class ChainTests(unittest.TestCase):
 
     def test_model_default_and_override(self):
         attempts = build_attempts("", EXTRA)
-        self.assertEqual(attempts[0]["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(attempts[0]["model"], OPENAI_COMPATIBLE["Groq"]["model"])
         self.assertEqual(attempts[1]["model"], "x/y:free")
 
     def test_no_fallback_keeps_first_only(self):
@@ -101,6 +101,49 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(url, "https://api.groq.com/openai/v1/chat/completions")
         self.assertIs(kw["verify"], False)
         self.assertEqual(kw["headers"]["Authorization"], "Bearer k")
+
+
+class ModelAvailabilityTests(unittest.TestCase):
+    def test_retired_model_404_and_410_say_how_to_fix_it(self):
+        for code in (404, 410):
+            post = make_post([FakeResp(code)])
+            _, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "k"}}), None, post=post)
+            self.assertIn("tidak tersedia", log[0]["Detail"])
+            self.assertIn("Cek model", log[0]["Detail"])
+            self.assertIn(str(code), log[0]["Detail"])
+
+    def test_router_model_actually_served_is_recorded(self):
+        resp = FakeResp(200, {"model": "vendor/real-model:free", "choices": [{"message": {"content": "ok"}}]})
+        text, used, log = run_chain("p", build_attempts("", {"OpenRouter": {"key": "k", "model": "openrouter/free"}}), None, post=make_post([resp]))
+        self.assertEqual(used["model"], "openrouter/free -> vendor/real-model:free")
+        self.assertEqual(log[0]["Model"], used["model"])
+
+    def test_same_model_echoed_back_is_not_rewritten(self):
+        resp = FakeResp(200, {"model": "openai/gpt-oss-120b", "choices": [{"message": {"content": "ok"}}]})
+        _, used, _ = run_chain("p", build_attempts("", {"Groq": {"key": "k", "model": "openai/gpt-oss-120b"}}), None, post=make_post([resp]))
+        self.assertEqual(used["model"], "openai/gpt-oss-120b")
+
+    def test_gemini_model_default_and_override(self):
+        self.assertEqual(build_attempts("g", {})[0]["model"], GEMINI_MODEL)
+        self.assertEqual(build_attempts("g", {}, gemini_model=" gemini-x ")[0]["model"], "gemini-x")
+
+    def test_list_models_sorted_and_openrouter_free_only(self):
+        data = {"data": [{"id": "b/model"}, {"id": "a/model:free"}, {"id": "openrouter/free"}, {"id": "c/paid"}]}
+        get = lambda url, **kw: FakeResp(200, data)
+        self.assertEqual(list_models("Groq", "k", get=get), ["a/model:free", "b/model", "c/paid", "openrouter/free"])
+        self.assertEqual(list_models("OpenRouter", "k", get=get), ["a/model:free", "openrouter/free"])
+
+    def test_list_models_errors_never_contain_the_key(self):
+        def boom(url, **kw):
+            raise RuntimeError("connection failed for key SECRETKEY")
+        with self.assertRaises(LLMError) as ctx:
+            list_models("Groq", "SECRETKEY", get=boom)
+        self.assertNotIn("SECRETKEY", str(ctx.exception))
+        with self.assertRaises(LLMError) as ctx:
+            list_models("Groq", "SECRETKEY", get=lambda url, **kw: FakeResp(401))
+        self.assertIn("401", str(ctx.exception))
+        with self.assertRaises(LLMError):
+            list_models("Nope", "k")
 
 
 if __name__ == "__main__":

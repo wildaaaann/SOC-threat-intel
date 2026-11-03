@@ -13,11 +13,15 @@ import requests
 # Semua penyedia ini memakai format OpenAI `/chat/completions`. Gemini dipanggil lewat `gemini_fn` dari app.
 # Nama model hanya nilai awal dan bisa diubah di sidebar: katalog model gratis sering berganti.
 OPENAI_COMPATIBLE = {
-    "NVIDIA NIM": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "meta/llama-3.3-70b-instruct"},
-    "Groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
-    "OpenRouter": {"base_url": "https://openrouter.ai/api/v1", "model": "meta-llama/llama-3.3-70b-instruct:free"},
+    "NVIDIA NIM": {"base_url": "https://integrate.api.nvidia.com/v1", "model": "nvidia/nemotron-3-super-120b-a12b"},
+    "Groq": {"base_url": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-120b"},
+    # "openrouter/free" memilih sendiri satu model gratis yang sedang tersedia. Model yang benar-benar menjawab
+    # dicatat dari respons (lihat run_chain), karena akurasi harus dihitung per model.
+    "OpenRouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
 }
-GEMINI_MODEL = "gemini-2.5-flash"
+# Nama model gratis sering dipensiunkan (gemini-2.5-flash dan llama-3.3-70b sudah gagal di tiga penyedia).
+# Nilai ini hanya titik awal; tombol "Cek model yang tersedia" di sidebar membaca daftar model langsung dari penyedia.
+GEMINI_MODEL = "gemini-3.8-flash"
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
@@ -26,7 +30,7 @@ class LLMError(Exception):
     """Kegagalan satu penyedia yang layak dicoba ulang di penyedia lain."""
 
 
-def build_attempts(gemini_key, extra, fallback=True):
+def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
     """Susun urutan percobaan.
 
     `extra` = {nama_penyedia: {"key": ..., "model": ...}}. Penyedia tanpa key dilewati.
@@ -34,7 +38,7 @@ def build_attempts(gemini_key, extra, fallback=True):
     """
     attempts = []
     if gemini_key:
-        attempts.append({"provider": "Gemini", "model": GEMINI_MODEL, "key": gemini_key, "kind": "gemini"})
+        attempts.append({"provider": "Gemini", "model": (gemini_model or GEMINI_MODEL).strip(), "key": gemini_key, "kind": "gemini"})
     for name, cfg in OPENAI_COMPATIBLE.items():
         entry = (extra or {}).get(name) or {}
         if entry.get("key"):
@@ -61,11 +65,17 @@ def call_openai_compatible(prompt, attempt, verify, post=requests.post, timeout=
         raise LLMError("Batas pemakaian gratis tercapai (HTTP 429)")
     if status in (401, 403):
         raise LLMError(f"API key ditolak (HTTP {status})")
+    if status in (404, 410):
+        raise LLMError(f"Model '{attempt['model']}' tidak tersedia (HTTP {status}); kemungkinan sudah dipensiunkan. Klik 'Cek model yang tersedia' di sidebar lalu ganti nama modelnya")
     response.raise_for_status()
     try:
-        text = response.json()["choices"][0]["message"]["content"] or ""
+        body = response.json()
+        text = body["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError, ValueError):
         raise LLMError("Format respons tidak dikenali")
+    served = body.get("model") if isinstance(body, dict) else None
+    if isinstance(served, str) and served and served != attempt["model"]:
+        attempt["served_model"] = served  # router (mis. openrouter/free) memilih model; catat yang sebenarnya menjawab
     text = _THINK.sub("", text).strip()  # model penalaran kadang menyertakan <think>...</think>
     if not text:
         raise LLMError("Respons kosong")
@@ -97,6 +107,9 @@ def run_chain(prompt, attempts, gemini_fn, verify=True, post=requests.post):
             log.append(entry)
             continue
         entry.update({"Status": "OK", "Detail": ""})
+        if attempt.get("served_model"):
+            attempt = dict(attempt, model=f"{attempt['model']} -> {attempt['served_model']}")
+            entry["Model"] = attempt["model"]
         log.append(entry)
         return text, attempt, log
     return None, None, log
@@ -116,3 +129,28 @@ def gemini_generate(prompt, key, model, verify=True):
         context.verify_mode = ssl.CERT_NONE
         client = genai.Client(api_key=key, http_options=types.HttpOptions(client_args={'verify': context}))
     return client.models.generate_content(model=model, contents=prompt).text
+
+
+def list_models(provider, key, verify=True, get=None, timeout=20):
+    """Daftar id model yang ditawarkan satu penyedia OpenAI-compatible, untuk memilih nama yang masih berlaku.
+
+    Mengembalikan list id terurut. LLMError (pesan tanpa key) bila gagal. Untuk OpenRouter hanya model gratis.
+    """
+    cfg = OPENAI_COMPATIBLE.get(provider)
+    if not cfg:
+        raise LLMError(f"Penyedia tidak dikenal: {provider}")
+    get = get or requests.get
+    try:
+        response = get(cfg["base_url"] + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=timeout, verify=verify)
+        status = getattr(response, "status_code", 200)
+        if status in (401, 403):
+            raise LLMError(f"API key ditolak (HTTP {status})")
+        response.raise_for_status()
+        ids = [m["id"] for m in response.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+    except LLMError:
+        raise
+    except Exception as exc:
+        raise LLMError(f"Gagal membaca daftar model: {type(exc).__name__}") from None
+    if provider == "OpenRouter":
+        ids = [i for i in ids if i.endswith(":free") or i == "openrouter/free"]
+    return sorted(set(ids))

@@ -6,7 +6,7 @@ import json
 import urllib3
 from datetime import datetime, timezone
 from ioc_extract import extract_iocs, pick_primary, first_public_ip
-from llm_providers import OPENAI_COMPATIBLE, build_attempts, gemini_generate
+from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attempts, gemini_generate, list_models
 from triage_pipeline import enrich, generate_report
 from time import monotonic as _monotonic
 from triage_report import (SEVERITIES, VERDICTS, UNREADABLE, parse_ai_verdict, layers_complete, layers_status,
@@ -87,6 +87,7 @@ def secret_input(label, server_value, key=None, container=st.sidebar):
 st.sidebar.header("Konfigurasi API")
 st.sidebar.caption("Key yang sudah diatur di server tidak ditampilkan. Biarkan kolom kosong untuk memakainya, atau tempel key sendiri untuk sesi ini saja.")
 gemini_key = secret_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", ENV_GEMINI)
+gemini_model = st.sidebar.text_input("Model Gemini", value=GEMINI_MODEL, key="gemini_model")
 with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
     st.caption("Dipakai berurutan bila penyedia sebelumnya gagal (batas gratis habis, server sibuk). Kosongkan key untuk melewati penyedia.")
     llm_extra = {}
@@ -95,6 +96,18 @@ with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
             "key": secret_input(f"{_name} API Key", ENV_LLM.get(_name, ""), key=f"llm_key_{_name}", container=st),
             "model": st.text_input(f"Model {_name}", value=_cfg["model"], key=f"llm_model_{_name}"),
         }
+    if st.button("Cek model yang tersedia", key="check_models",
+                 help="Membaca daftar model langsung dari tiap penyedia yang punya key (key dari server tidak ditampilkan). Salin nama model yang masih ada ke kolom Model."):
+        for _name, _entry in llm_extra.items():
+            if not _entry["key"]:
+                continue
+            try:
+                _ids = list_models(_name, _entry["key"], verify=tls_verify())
+                st.markdown(f"**{_name}** ({len(_ids)} model)")
+                st.code("\n".join(_ids[:60]) or "(kosong)")
+            except LLMError as exc:
+                st.warning(f"{_name}: {exc}")
+        st.caption("Gemini: nama model aktif ada di https://ai.google.dev/gemini-api/docs/models")
     llm_fallback = st.checkbox(
         "Fallback otomatis ke penyedia lain",
         value=True,
@@ -149,7 +162,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
     """Pengayaan CTI lalu laporan AI. Mengembalikan dict hasil, atau {"error": pesan} bila masukan belum lengkap."""
     if analysis_mode == MODE_ASSISTED and analyst_status is None:
         return {"error": "Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind."}
-    if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra):
+    if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra, gemini_model=gemini_model):
         return {"error": "Harap masukkan VirusTotal, AbuseIPDB, dan minimal satu API Key AI (Gemini atau penyedia cadangan) di menu Sidebar terlebih dahulu."}
 
     verify = tls_verify()
@@ -165,7 +178,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
         return ctx
 
     with st.spinner("2/2: Menghasilkan Laporan Akhir dengan AI..."):
-        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback), gemini_call, verify)
+        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback, gemini_model=gemini_model), gemini_call, verify)
 
     # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
     is_blind = analysis_mode == MODE_BLIND
