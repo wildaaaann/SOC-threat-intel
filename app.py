@@ -6,7 +6,7 @@ import json
 import urllib3
 from datetime import datetime, timezone
 from ioc_extract import extract_iocs, pick_primary, first_public_ip
-from llm_providers import OPENAI_COMPATIBLE, build_attempts, gemini_generate
+from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attempts, gemini_generate, list_models
 from triage_pipeline import enrich, generate_report
 from time import monotonic as _monotonic
 from triage_report import (SEVERITIES, VERDICTS, UNREADABLE, parse_ai_verdict, layers_complete, layers_status,
@@ -73,16 +73,41 @@ except:
     pass # Jika secrets.toml tidak ada di lokal, biarkan kosong
 
 # --- SIDEBAR KONFIGURASI API ---
+def secret_input(label, server_value, key=None, container=st.sidebar):
+    """Kolom key yang SELALU kosong saat dibuka. Nilai dari secrets tidak boleh dikirim ke browser.
+
+    `value=` pada text_input ikut terkirim ke browser pengunjung (terbaca lewat DevTools) walau type="password".
+    Key dari secrets dipakai di server saja: bila kolom kosong, hasilnya adalah key server.
+    """
+    typed = container.text_input(label, type="password", value="", key=key,
+                                 placeholder="Memakai key dari server" if server_value else "Tempel key di sini")
+    return typed.strip() or server_value
+
+
 st.sidebar.header("Konfigurasi API")
-gemini_key = st.sidebar.text_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", type="password", value=ENV_GEMINI)
+st.sidebar.caption("Key yang sudah diatur di server tidak ditampilkan. Biarkan kolom kosong untuk memakainya, atau tempel key sendiri untuk sesi ini saja.")
+gemini_key = secret_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", ENV_GEMINI)
+gemini_model = st.sidebar.text_input("Model Gemini", value=GEMINI_MODEL, key="gemini_model")
 with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
     st.caption("Dipakai berurutan bila penyedia sebelumnya gagal (batas gratis habis, server sibuk). Kosongkan key untuk melewati penyedia.")
     llm_extra = {}
     for _name, _cfg in OPENAI_COMPATIBLE.items():
         llm_extra[_name] = {
-            "key": st.text_input(f"{_name} API Key", type="password", value=ENV_LLM.get(_name, ""), key=f"llm_key_{_name}"),
+            "key": secret_input(f"{_name} API Key", ENV_LLM.get(_name, ""), key=f"llm_key_{_name}", container=st),
             "model": st.text_input(f"Model {_name}", value=_cfg["model"], key=f"llm_model_{_name}"),
         }
+    if st.button("Cek model yang tersedia", key="check_models",
+                 help="Membaca daftar model langsung dari tiap penyedia yang punya key (key dari server tidak ditampilkan). Salin nama model yang masih ada ke kolom Model."):
+        for _name, _entry in llm_extra.items():
+            if not _entry["key"]:
+                continue
+            try:
+                _ids = list_models(_name, _entry["key"], verify=tls_verify())
+                st.markdown(f"**{_name}** ({len(_ids)} model)")
+                st.code("\n".join(_ids[:60]) or "(kosong)")
+            except LLMError as exc:
+                st.warning(f"{_name}: {exc}")
+        st.caption("Gemini: nama model aktif ada di https://ai.google.dev/gemini-api/docs/models")
     llm_fallback = st.checkbox(
         "Fallback otomatis ke penyedia lain",
         value=True,
@@ -90,11 +115,11 @@ with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
         help="Matikan saat pengujian skripsi agar semua laporan berasal dari satu model. Penyedia dan model dicatat di setiap riwayat.",
     )
 st.sidebar.markdown("---")
-vt_key = st.sidebar.text_input("VirusTotal API Key (Wajib)", type="password", value=ENV_VT)
-abuse_key = st.sidebar.text_input("AbuseIPDB API Key (Wajib)", type="password", value=ENV_ABUSE)
+vt_key = secret_input("VirusTotal API Key (Wajib)", ENV_VT)
+abuse_key = secret_input("AbuseIPDB API Key (Wajib)", ENV_ABUSE)
 st.sidebar.markdown("---")
-urlscan_key = st.sidebar.text_input("URLScan API Key (Opsional)", type="password", value=ENV_URLSCAN)
-hybrid_key = st.sidebar.text_input("HybridAnalysis API Key (Opsional)", type="password", value=ENV_HYBRID)
+urlscan_key = secret_input("URLScan API Key (Opsional)", ENV_URLSCAN)
+hybrid_key = secret_input("HybridAnalysis API Key (Opsional)", ENV_HYBRID)
 st.sidebar.markdown("---")
 st.sidebar.checkbox(
     "Verifikasi sertifikat SSL (disarankan)",
@@ -137,7 +162,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
     """Pengayaan CTI lalu laporan AI. Mengembalikan dict hasil, atau {"error": pesan} bila masukan belum lengkap."""
     if analysis_mode == MODE_ASSISTED and analyst_status is None:
         return {"error": "Mode Dibantu butuh Status Alert. Pilih statusnya, atau ganti ke mode Blind."}
-    if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra):
+    if not vt_key or not abuse_key or not build_attempts(gemini_key, llm_extra, gemini_model=gemini_model):
         return {"error": "Harap masukkan VirusTotal, AbuseIPDB, dan minimal satu API Key AI (Gemini atau penyedia cadangan) di menu Sidebar terlebih dahulu."}
 
     verify = tls_verify()
@@ -153,7 +178,7 @@ def run_pipeline(*, alert_name, ioc_input, analyst_status, action, related_ip, r
         return ctx
 
     with st.spinner("2/2: Menghasilkan Laporan Akhir dengan AI..."):
-        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback), gemini_call, verify)
+        gen = generate_report(ctx, build_attempts(gemini_key, llm_extra, llm_fallback, gemini_model=gemini_model), gemini_call, verify)
 
     # --- BANDINGKAN VERDICT AI DENGAN STATUS ANALIS (setelah AI menjawab) ---
     is_blind = analysis_mode == MODE_BLIND
@@ -610,12 +635,17 @@ with tab_wazuh:
 
         with st.expander("Koneksi Wazuh Indexer", expanded=not st.session_state.get("wazuh_alerts")):
             st.caption("Alert Wazuh disimpan di Wazuh Indexer (port 9200), bukan di API manager (port 55000). Lab biasanya memakai sertifikat self-signed: isi path root-ca.pem agar verifikasi SSL global tidak perlu dimatikan.")
-            wz_url = st.text_input("URL Wazuh Indexer:", value=ENV_WAZUH.get("url") or "https://localhost:9200", key="wz_url")
+            # Nilai dari secrets (URL internal, akun, password) tidak diisikan ke kolom: itu ikut terkirim ke browser.
+            wz_url_typed = st.text_input("URL Wazuh Indexer:", value="" if ENV_WAZUH.get("url") else "https://localhost:9200", key="wz_url",
+                                         placeholder="Memakai URL dari server" if ENV_WAZUH.get("url") else "")
+            wz_url = wz_url_typed.strip() or ENV_WAZUH.get("url") or ""
             wz_col1, wz_col2 = st.columns(2)
             with wz_col1:
-                wz_user = st.text_input("Username Indexer:", value=ENV_WAZUH.get("user") or "", key="wz_user")
+                wz_user = st.text_input("Username Indexer:", value="", key="wz_user",
+                                        placeholder="Memakai akun dari server" if ENV_WAZUH.get("user") else "").strip() or ENV_WAZUH.get("user") or ""
             with wz_col2:
-                wz_pass = st.text_input("Password Indexer:", type="password", value=ENV_WAZUH.get("password") or "", key="wz_pass")
+                wz_pass = st.text_input("Password Indexer:", type="password", value="", key="wz_pass",
+                                        placeholder="Memakai password dari server" if ENV_WAZUH.get("password") else "") or ENV_WAZUH.get("password") or ""
             wz_ca = st.text_input("Path CA Wazuh (opsional):", placeholder="/path/ke/root-ca.pem", key="wz_ca")
             wz_c1, wz_c2, wz_c3 = st.columns(3)
             with wz_c1:
@@ -637,7 +667,7 @@ with tab_wazuh:
                         wz_url, wz_user, wz_pass, verify=(wz_ca.strip() or tls_verify()),
                         size=wz_size, min_level=wz_level, hours=wz_hours, query=wz_query,
                     )
-                st.session_state.wazuh_source = f"Wazuh Indexer {wz_url}"
+                st.session_state.wazuh_source = f"Wazuh Indexer {wz_url}" if wz_url_typed.strip() else "Wazuh Indexer (alamat dari server)"
             except WazuhError as exc:
                 st.error(str(exc))
         if wz_load:
