@@ -8,9 +8,10 @@ from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attem
 
 
 class FakeResp:
-    def __init__(self, status=200, payload=None):
+    def __init__(self, status=200, payload=None, text=""):
         self.status_code = status
         self._payload = payload if payload is not None else {}
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -88,8 +89,8 @@ class ChainTests(unittest.TestCase):
         self.assertNotIn("SECRETKEY", str(log))
 
     def test_all_fail_returns_none_with_full_log(self):
-        post = make_post([FakeResp(500), RuntimeError("timeout")])
-        text, used, log = run_chain("p", build_attempts("", EXTRA), None, post=post)
+        post = make_post([FakeResp(500), FakeResp(500), RuntimeError("timeout"), RuntimeError("timeout")])
+        text, used, log = run_chain("p", build_attempts("", EXTRA), None, post=post, retry_wait=0, sleep=lambda s: None)
         self.assertIsNone(text)
         self.assertIsNone(used)
         self.assertEqual(len(log), 2)
@@ -144,6 +145,95 @@ class ModelAvailabilityTests(unittest.TestCase):
         self.assertIn("401", str(ctx.exception))
         with self.assertRaises(LLMError):
             list_models("Nope", "k")
+
+
+class DiagnosticsAndRetryTests(unittest.TestCase):
+    NO_WAIT = {"retry_wait": 0, "sleep": lambda s: None}
+
+    def test_provider_error_message_is_shown_without_the_key(self):
+        resp = FakeResp(400, {"error": {"message": "model requires terms acceptance"}})
+        _, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "SECRETKEY"}}), None, post=make_post([resp]), **self.NO_WAIT)
+        self.assertIn("HTTP 400", log[0]["Detail"])
+        self.assertIn("terms acceptance", log[0]["Detail"])
+        self.assertNotIn("SECRETKEY", str(log))
+
+    def test_error_without_json_falls_back_to_text(self):
+        resp = FakeResp(400, text="plain failure")
+        resp.json = lambda: (_ for _ in ()).throw(ValueError("no json"))
+        _, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "k"}}), None, post=make_post([resp]), **self.NO_WAIT)
+        self.assertIn("plain failure", log[0]["Detail"])
+
+    def test_gemini_503_is_retried_once_then_succeeds(self):
+        calls = []
+
+        def flaky(p, k, m):
+            calls.append(m)
+            if len(calls) == 1:
+                raise RuntimeError("503 UNAVAILABLE. high demand")
+            return "laporan"
+        text, used, log = run_chain("p", build_attempts("gem", {}), flaky, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], len(calls), log[0]["Status"]), ("laporan", "Gemini", 2, "OK"))
+        self.assertIn("1x ulang", log[0]["Detail"])
+
+    def test_persistent_503_falls_through_after_one_retry_only(self):
+        calls = []
+
+        def down(p, k, m):
+            calls.append(1)
+            raise RuntimeError("503 UNAVAILABLE")
+        post = make_post([ok("dari groq")])
+        text, used, log = run_chain("p", build_attempts("gem", {"Groq": {"key": "g"}}), down, post=post, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], len(calls)), ("dari groq", "Groq", 2))
+        self.assertIn("sudah diulang 1x", log[0]["Detail"])
+
+    def test_permanent_errors_are_not_retried(self):
+        for message in ("404 NOT_FOUND model gone", "API key ditolak (HTTP 401)", "HTTP 400: bad request"):
+            calls = []
+
+            def fail(p, k, m, message=message):
+                calls.append(1)
+                raise RuntimeError(message)
+            run_chain("p", build_attempts("gem", {}), fail, **self.NO_WAIT)
+            self.assertEqual(len(calls), 1, message)
+
+    def test_http_503_from_openai_compatible_is_retried(self):
+        post = make_post([FakeResp(503, {"error": {"message": "overloaded"}}), ok("pulih")])
+        text, _, log = run_chain("p", build_attempts("", {"Groq": {"key": "g"}}), None, post=post, **self.NO_WAIT)
+        self.assertEqual((text, len(post.calls)), ("pulih", 2))
+
+
+class MultiGeminiKeyTests(unittest.TestCase):
+    NO_WAIT = {"retry_wait": 0, "sleep": lambda s: None}
+
+    def test_two_keys_become_two_gemini_attempts_in_order_with_slots(self):
+        attempts = build_attempts(["k1", "k2"], {})
+        self.assertEqual([(a["provider"], a["key"], a["slot"], a["model"]) for a in attempts],
+                         [("Gemini", "k1", "#1", GEMINI_MODEL), ("Gemini", "k2", "#2", GEMINI_MODEL)])
+
+    def test_blank_and_duplicate_keys_are_dropped(self):
+        self.assertEqual([a["key"] for a in build_attempts(["", "k1", "k1", None], {})], ["k1"])
+        self.assertEqual(build_attempts(["", ""], {}), [])
+
+    def test_quota_on_first_key_falls_to_second_key_with_same_model(self):
+        used_keys = []
+
+        def gem(p, k, m):
+            used_keys.append(k)
+            if k == "k1":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED")
+            return "laporan"
+        text, used, log = run_chain("p", build_attempts(["k1", "k2"], EXTRA), gem, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], used["model"], used["slot"], used_keys), ("laporan", "Gemini", GEMINI_MODEL, "#2", ["k1", "k2"]))
+        self.assertEqual([(r["Kunci"], r["Status"]) for r in log], [("#1", "Gagal"), ("#2", "OK")])
+        self.assertNotIn("k1", str(log))
+
+    def test_no_fallback_still_rotates_gemini_keys_but_never_switches_provider(self):
+        attempts = build_attempts(["k1", "k2"], EXTRA, fallback=False)
+        self.assertEqual([a["provider"] for a in attempts], ["Gemini", "Gemini"])
+        self.assertEqual(len(build_attempts("k1", EXTRA, fallback=False)), 1)
+
+    def test_single_string_key_still_works(self):
+        self.assertEqual([a["slot"] for a in build_attempts("gem", {})], ["#1"])
 
 
 if __name__ == "__main__":

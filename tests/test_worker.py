@@ -158,7 +158,8 @@ class WorkerTests(unittest.TestCase):
 
     def test_all_llm_down_is_held(self):
         self.llm = FakeLLM(status=500)
-        self.cycle([make_alert("a5", "2026-10-30T01:59:00.000+0000")])
+        with mock.patch("llm_providers.time.sleep"):  # HTTP 500 diulang sekali; jangan menunggu sungguhan di tes
+            self.cycle([make_alert("a5", "2026-10-30T01:59:00.000+0000")])
         (t,) = self.store.all()
         self.assertEqual(t["status"], STATUS_NEEDS_HUMAN)
         self.assertIn("Semua penyedia AI gagal", t["hold_reasons"])
@@ -260,7 +261,9 @@ class ConfigTests(unittest.TestCase):
 
     def test_gemini_alone_is_enough(self):
         env = {k: v for k, v in self.BASE.items() if k != "GROQ_API_KEY"}
-        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x")).gemini_key, "x")
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x")).gemini_key, ["x"])
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY="x", GEMINI_API_KEY_2="y")).gemini_key, ["x", "y"])
+        self.assertEqual(load_config(dict(env, GEMINI_API_KEY_2="y")).gemini_key, ["y"])
 
 
 if __name__ == "__main__":
