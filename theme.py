@@ -110,6 +110,34 @@ textarea { font-family: var(--soc-mono) !important; font-size: .84rem !important
 /* Alert: sudut tajam */
 [data-testid="stAlert"] { border-radius: 2px; }
 
+/* Menu navigasi sidebar: tombol berbentuk item menu, item aktif berwarna oranye */
+.nav-group {
+    font-family: var(--soc-mono);
+    font-size: .68rem;
+    letter-spacing: .12em;
+    opacity: .6;
+    margin: 1rem 0 .25rem;
+}
+[data-testid="stSidebar"] .stButton > button {
+    justify-content: flex-start;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: .35rem .7rem;
+}
+[data-testid="stSidebar"] .stButton > button > div,
+[data-testid="stSidebar"] .stButton > button [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] .stButton > button p {
+    justify-content: flex-start;
+    text-align: left;
+    width: 100%;
+}
+[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {
+    background: color-mix(in srgb, #ff6a1a 14%, transparent);
+    color: #ff6a1a;
+}
+
 /* Seleksi teks dan scrollbar */
 ::selection { background: #ff6a1a; color: #080808; }
 * {

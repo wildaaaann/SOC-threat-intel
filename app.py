@@ -4,14 +4,14 @@ import os
 import re
 import json
 import urllib3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from ioc_extract import extract_iocs, pick_primary, first_public_ip
 from llm_providers import GEMINI_MODEL, OPENAI_COMPATIBLE, LLMError, build_attempts, gemini_generate, list_models
 from triage_pipeline import enrich, generate_report
 from time import monotonic as _monotonic
 from triage_report import (SEVERITIES, VERDICTS, UNREADABLE, parse_ai_verdict, layers_complete, layers_status,
                            parse_closing_reason, parse_description, parse_recommendations, parse_severity)
-from ticket_policy import (PRIORITY_HUMAN, REVIEW_PENDING, STATUS_CLOSED_AI, STATUS_NEEDS_HUMAN, review_changes,
+from ticket_policy import (PRIORITY_HUMAN, PRIORITY_MUST, REVIEW_PENDING, STATUS_CLOSED_AI, STATUS_CLOSED_HUMAN, STATUS_NEEDS_HUMAN, review_changes,
                            sort_for_review, summarize_tickets)
 from ticket_store import TicketStore, read_worker_state, tickets_to_csv
 from wazuh_client import WazuhError, alert_label, alert_to_inputs, fetch_alerts, parse_alerts_file, parse_timestamp
@@ -38,9 +38,6 @@ st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", 
 # --- TEMA (hanya tampilan, lihat theme.py dan .streamlit/config.toml) ---
 from theme import apply_theme
 apply_theme()
-
-st.title("SOC Threat Inteligence Dashboard")
-st.markdown("Automation gathering threat Inteligence and report @wildaaan.")
 
 # --- AMBIL DATA DARI STREAMLIT SECRETS (Dengan Penanganan Error Lanjutan) ---
 ENV_GEMINI = ""
@@ -74,31 +71,102 @@ try:
 except:
     pass # Jika secrets.toml tidak ada di lokal, biarkan kosong
 
-# --- SIDEBAR KONFIGURASI API ---
-def secret_input(label, server_value, key=None, container=st.sidebar):
-    """Kolom key yang SELALU kosong saat dibuka. Nilai dari secrets tidak boleh dikirim ke browser.
+# --- STATE, NAVIGASI, DAN PENGATURAN API ---
+# Hanya halaman terpilih yang digambar. Streamlit membuang state widget yang tidak digambar pada satu putaran, jadi
+# pengaturan API disalin ulang ke state di awal tiap putaran supaya tidak hilang saat pindah halaman.
+# Hanya kunci pengaturan (teks dan centang) yang boleh disalin: menulis ulang kunci tombol (nav_*, dst.) membuat
+# Streamlit melempar StreamlitValueAssignmentNotAllowedError begitu tombolnya digambar lagi.
+_PERSIST_EXACT = {"gemini_model", "llm_fallback", "tls_verify"}
+_PERSIST_PREFIX = ("api_", "llm_key_", "llm_model_")
+for _k in list(st.session_state.keys()):
+    if _k in _PERSIST_EXACT or _k.startswith(_PERSIST_PREFIX):
+        st.session_state[_k] = st.session_state[_k]
+# Default diisi lewat state, bukan value=: widget dengan value= yang kuncinya sudah ada di state memicu peringatan Streamlit.
+st.session_state.setdefault("gemini_model", GEMINI_MODEL)
+st.session_state.setdefault("llm_fallback", True)
+st.session_state.setdefault("tls_verify", True)
+for _n, _c in OPENAI_COMPATIBLE.items():
+    st.session_state.setdefault(f"llm_model_{_n}", _c["model"])
 
-    `value=` pada text_input ikut terkirim ke browser pengunjung (terbaca lewat DevTools) walau type="password".
-    Key dari secrets dipakai di server saja: bila kolom kosong, hasilnya adalah key server.
-    """
-    typed = container.text_input(label, type="password", value="", key=key,
-                                 placeholder="Memakai key dari server" if server_value else "Tempel key di sini")
-    return typed.strip() or server_value
+NAV = [
+    ("INCIDENT OPERATIONS", [("Alert Manual", "manual"), ("Alert Wazuh", "wazuh"), ("Tiket Closed", "closed"), ("Uji Skenario", "scenario")]),
+    ("ANALISIS", [("Evaluasi", "eval"), ("History", "history")]),
+    ("ALAT", [("Defang", "defang"), ("Shift Summarizer", "shift")]),
+    ("PENGATURAN", [("API", "api")]),
+]
+PAGES = [label for _, items in NAV for label, _ in items]
+if st.session_state.get("page") not in PAGES:
+    st.session_state.page = "Alert Manual"
+page = st.session_state.page
+
+st.sidebar.markdown("**SOC THREAT INTEL**")
+st.sidebar.caption("Wazuh + CTI + AI triage")
+for _group, _items in NAV:
+    st.sidebar.markdown(f"<div class='nav-group'>{_group}</div>", unsafe_allow_html=True)
+    for _label, _slug in _items:
+        if st.sidebar.button(_label, key=f"nav_{_slug}", type="primary" if page == _label else "secondary", width="stretch"):
+            st.session_state.page = _label
+            st.rerun()
+
+st.title(page)
+if not st.session_state.get("tls_verify", True):
+    st.warning("Verifikasi SSL mati: request ke VirusTotal, AbuseIPDB, URLScan, HybridAnalysis, TIP Neiki, dan Gemini tidak memeriksa sertifikat server. Nyalakan lagi di halaman API.")
 
 
-st.sidebar.header("Konfigurasi API")
-st.sidebar.caption("Key yang sudah diatur di server tidak ditampilkan. Biarkan kolom kosong untuk memakainya, atau tempel key sendiri untuk sesi ini saja.")
-gemini_key = secret_input("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", ENV_GEMINI)
-gemini_key2 = secret_input("Gemini API Key #2 (Opsional, akun lain: dicoba bila key pertama gagal)", ENV_GEMINI2)
-gemini_model = st.sidebar.text_input("Model Gemini", value=GEMINI_MODEL, key="gemini_model")
-with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
+def typed_key(state_key):
+    return (st.session_state.get(state_key) or "").strip()
+
+
+# Nilai yang dipakai pipeline: isian sesi bila ada, kalau tidak key dari server (secrets). Key server tidak pernah
+# dimasukkan ke widget, karena value= ikut terkirim ke browser pengunjung.
+gemini_key = typed_key("api_gemini") or ENV_GEMINI
+gemini_key2 = typed_key("api_gemini2") or ENV_GEMINI2
+gemini_model = st.session_state.get("gemini_model") or GEMINI_MODEL
+vt_key = typed_key("api_vt") or ENV_VT
+abuse_key = typed_key("api_abuse") or ENV_ABUSE
+urlscan_key = typed_key("api_urlscan") or ENV_URLSCAN
+hybrid_key = typed_key("api_hybrid") or ENV_HYBRID
+llm_extra = {
+    _name: {"key": typed_key(f"llm_key_{_name}") or ENV_LLM.get(_name, ""),
+            "model": st.session_state.get(f"llm_model_{_name}") or _cfg["model"]}
+    for _name, _cfg in OPENAI_COMPATIBLE.items()
+}
+llm_fallback = st.session_state.get("llm_fallback", True)
+
+
+def api_field(label, server_value, key):
+    """Kolom key yang SELALU kosong saat dibuka; nilai server hanya dipakai di server."""
+    return st.text_input(label, type="password", value="", key=key,
+                         placeholder="Memakai key dari server" if server_value else "Tempel key di sini")
+
+
+def key_source(state_key, server_value):
+    if typed_key(state_key):
+        return "Diisi di sesi ini"
+    return "Dari server" if server_value else "Kosong"
+
+
+def render_api_page():
+    st.markdown("Key yang sudah diatur di server (secrets) tidak ditampilkan. Biarkan kolom kosong untuk memakainya, atau tempel key sendiri untuk sesi ini saja. Isian hilang saat halaman di-refresh.")
+    col_cti, col_ai = st.columns(2)
+    with col_cti:
+        st.subheader("Intel (CTI)")
+        api_field("VirusTotal API Key (Wajib)", ENV_VT, "api_vt")
+        api_field("AbuseIPDB API Key (Wajib)", ENV_ABUSE, "api_abuse")
+        api_field("URLScan API Key (Opsional)", ENV_URLSCAN, "api_urlscan")
+        api_field("HybridAnalysis API Key (Opsional)", ENV_HYBRID, "api_hybrid")
+    with col_ai:
+        st.subheader("AI")
+        api_field("Gemini API Key (Wajib, atau isi salah satu penyedia cadangan)", ENV_GEMINI, "api_gemini")
+        api_field("Gemini API Key #2 (Opsional, akun lain: dicoba bila key pertama gagal)", ENV_GEMINI2, "api_gemini2")
+        st.text_input("Model Gemini", key="gemini_model")
+    st.subheader("Penyedia AI cadangan (gratis)")
     st.caption("Dipakai berurutan bila penyedia sebelumnya gagal (batas gratis habis, server sibuk). Kosongkan key untuk melewati penyedia.")
-    llm_extra = {}
-    for _name, _cfg in OPENAI_COMPATIBLE.items():
-        llm_extra[_name] = {
-            "key": secret_input(f"{_name} API Key", ENV_LLM.get(_name, ""), key=f"llm_key_{_name}", container=st),
-            "model": st.text_input(f"Model {_name}", value=_cfg["model"], key=f"llm_model_{_name}"),
-        }
+    cols = st.columns(len(OPENAI_COMPATIBLE))
+    for col, (_name, _cfg) in zip(cols, OPENAI_COMPATIBLE.items()):
+        with col:
+            api_field(f"{_name} API Key", ENV_LLM.get(_name, ""), f"llm_key_{_name}")
+            st.text_input(f"Model {_name}", key=f"llm_model_{_name}")
     if st.button("Cek model yang tersedia", key="check_models",
                  help="Membaca daftar model langsung dari tiap penyedia yang punya key (key dari server tidak ditampilkan). Salin nama model yang masih ada ke kolom Model."):
         for _name, _entry in llm_extra.items():
@@ -111,27 +179,25 @@ with st.sidebar.expander("Penyedia AI cadangan (gratis)"):
             except LLMError as exc:
                 st.warning(f"{_name}: {exc}")
         st.caption("Gemini: nama model aktif ada di https://ai.google.dev/gemini-api/docs/models")
-    llm_fallback = st.checkbox(
+    st.subheader("Pengaturan")
+    st.checkbox(
         "Fallback otomatis ke penyedia lain",
-        value=True,
         key="llm_fallback",
         help="Matikan saat pengujian skripsi agar semua laporan berasal dari satu model. Penyedia dan model dicatat di setiap riwayat.",
     )
-st.sidebar.markdown("---")
-vt_key = secret_input("VirusTotal API Key (Wajib)", ENV_VT)
-abuse_key = secret_input("AbuseIPDB API Key (Wajib)", ENV_ABUSE)
-st.sidebar.markdown("---")
-urlscan_key = secret_input("URLScan API Key (Opsional)", ENV_URLSCAN)
-hybrid_key = secret_input("HybridAnalysis API Key (Opsional)", ENV_HYBRID)
-st.sidebar.markdown("---")
-st.sidebar.checkbox(
-    "Verifikasi sertifikat SSL (disarankan)",
-    value=True,
-    key="tls_verify",
-    help="Matikan hanya jika jaringan Anda memakai SSL inspection dan CA perusahaan belum dipasang. Pilihan ini dicatat di setiap riwayat analisis.",
-)
-if not st.session_state.get("tls_verify", True):
-    st.sidebar.warning("Verifikasi SSL mati: request ke VirusTotal, AbuseIPDB, URLScan, HybridAnalysis, TIP Neiki, dan Gemini tidak memeriksa sertifikat server.")
+    st.checkbox(
+        "Verifikasi sertifikat SSL (disarankan)",
+        key="tls_verify",
+        help="Matikan hanya jika jaringan Anda memakai SSL inspection dan CA perusahaan belum dipasang. Pilihan ini dicatat di setiap riwayat analisis.",
+    )
+    st.subheader("Status key")
+    st.table([{"Key": label, "Sumber": src} for label, src in [
+        ("VirusTotal", key_source("api_vt", ENV_VT)), ("AbuseIPDB", key_source("api_abuse", ENV_ABUSE)),
+        ("URLScan", key_source("api_urlscan", ENV_URLSCAN)), ("HybridAnalysis", key_source("api_hybrid", ENV_HYBRID)),
+        ("Gemini #1", key_source("api_gemini", ENV_GEMINI)), ("Gemini #2", key_source("api_gemini2", ENV_GEMINI2)),
+        *[(_n, key_source(f"llm_key_{_n}", ENV_LLM.get(_n, ""))) for _n in OPENAI_COMPATIBLE],
+    ]])
+
 
 # ==========================================
 # BAGIAN BERSAMA: PIPELINE ANALISIS, HASIL, DAN KEPUTUSAN RESPONS
@@ -578,15 +644,137 @@ def render_ticket_detail(ticket):
         st.rerun()
 
 
-# --- MEMBAGI UI MENJADI TAB ---
-tab_manual, tab_wazuh, tab_scenario, tab_eval, tab_history, tab_defang, tab_shift = st.tabs(
-    ["Alert Manual", "Alert Wazuh", "Uji Skenario", "Evaluasi", "History", "Defang", "Shift Summarizer"]
-)
+def closed_row(t):
+    reviewed = t.get("review_status") != REVIEW_PENDING
+    final = f"{t.get('final_verdict') or '-'} / {t.get('final_severity') or '-'}" if reviewed else "-"
+    return {
+        "ID": str(t.get("id", ""))[:10],
+        "Ticket": clip(f"{t.get('rule_description') or '(tanpa deskripsi)'} (rule {t.get('rule_id', '')})", 70),
+        "Priority": str(t.get("review_priority") or ""),
+        "Threat (AI)": f"{t.get('ai_verdict') or '-'} / {t.get('severity') or '-'}",
+        "Final (reviewer)": final,
+        "Status": str(t.get("status") or ""),
+        "Analyst": t.get("reviewer") or "AI",
+        "Alert ke tutup (detik)": "-" if t.get("alert_to_close_s") is None else str(t["alert_to_close_s"]),
+        "Created": str(t.get("processed_at_utc") or ""),
+        "Review": str(t.get("review_status") or ""),
+    }
+
+
+def _shift_closed_date(days):
+    st.session_state.ct_date = st.session_state.ct_date + timedelta(days=days)
+
+
+def _closed_today():
+    st.session_state.ct_date = datetime.now(timezone.utc).date()
+
+
+def render_closed_tickets():
+    """Daftar tiket yang sudah ditutup (oleh AI atau analis) dengan kartu ringkasan, pencarian, filter, dan ekspor."""
+    try:
+        everything = TICKETS.all()
+    except OSError as exc:
+        everything = []
+        st.error(f"Tidak bisa membaca {TICKETS.path}: {exc}")
+    closed = [t for t in everything if t.get("status") in (STATUS_CLOSED_AI, STATUS_CLOSED_HUMAN)]
+
+    if "ct_date" not in st.session_state:
+        st.session_state.ct_date = datetime.now(timezone.utc).date()
+    c_prev, c_date, c_next, c_today, c_all = st.columns([1, 3, 1, 2, 3])
+    all_dates = c_all.checkbox("Semua tanggal", value=True, key="ct_all")
+    c_prev.button("◀", key="ct_prev", on_click=_shift_closed_date, args=(-1,), disabled=all_dates)
+    c_date.date_input("Tanggal (UTC, menurut waktu tiket diproses)", key="ct_date", disabled=all_dates, label_visibility="collapsed")
+    c_next.button("▶", key="ct_next", on_click=_shift_closed_date, args=(1,), disabled=all_dates)
+    c_today.button("Hari ini", key="ct_today", on_click=_closed_today, disabled=all_dates)
+    scope = closed if all_dates else [t for t in closed if str(t.get("processed_at_utc", ""))[:10] == str(st.session_state.ct_date)]
+
+    def verdict_of(t):
+        return t.get("final_verdict") or t.get("ai_verdict")
+
+    cards = [
+        ("Semua closed", len(scope)),
+        ("Closed by AI", sum(1 for t in scope if t.get("status") == STATUS_CLOSED_AI)),
+        ("Closed by analis", sum(1 for t in scope if t.get("status") == STATUS_CLOSED_HUMAN)),
+        ("Belum direview", sum(1 for t in scope if t.get("review_status") == REVIEW_PENDING)),
+        ("Wajib review", sum(1 for t in scope if t.get("review_status") == REVIEW_PENDING and t.get("review_priority") == PRIORITY_MUST)),
+        ("FP closed", sum(1 for t in scope if verdict_of(t) == "False Positive")),
+        ("TP closed", sum(1 for t in scope if verdict_of(t) == "True Positive")),
+    ]
+    for col, (label, value) in zip(st.columns(len(cards)), cards):
+        with col:
+            with st.container(border=True):
+                st.metric(label, value)
+    st.caption("FP/TP closed memakai verdict akhir reviewer bila sudah direview, kalau belum memakai verdict AI. SLA tidak dihitung karena belum ada target waktu yang disepakati; kolom 'Alert ke tutup' menunjukkan waktu dari alert sampai ditutup AI.")
+
+    bar_search, bar_view = st.columns([4, 2])
+    query = bar_search.text_input("Cari", key="ct_search", placeholder="Cari ID, rule, agent, IoC, reviewer, severity, penyedia AI...", label_visibility="collapsed")
+    view = bar_view.radio("Tampilan", ["Tabel", "Kartu"], horizontal=True, key="ct_view", label_visibility="collapsed")
+
+    with st.expander("Filter"):
+        f1, f2, f3 = st.columns(3)
+        status_f = f1.multiselect("Status", [STATUS_CLOSED_AI, STATUS_CLOSED_HUMAN], key="ct_f_status")
+        severity_f = f2.multiselect("Severity AI", list(SEVERITIES), key="ct_f_sev")
+        verdict_f = f3.multiselect("Verdict", list(VERDICTS), key="ct_f_verdict")
+        f4, f5 = st.columns(2)
+        review_f = f4.multiselect("Review", sorted({str(t.get("review_status")) for t in closed}), key="ct_f_review")
+        priority_f = f5.multiselect("Prioritas", sorted({str(t.get("review_priority")) for t in closed}), key="ct_f_priority")
+    column_names = list(closed_row({}).keys())
+    with st.expander("Kolom"):
+        chosen_cols = st.multiselect("Kolom yang ditampilkan", column_names, default=column_names, key="ct_cols") or column_names
+
+    shown = list(scope)
+    if status_f:
+        shown = [t for t in shown if t.get("status") in status_f]
+    if severity_f:
+        shown = [t for t in shown if t.get("severity") in severity_f]
+    if verdict_f:
+        shown = [t for t in shown if verdict_of(t) in verdict_f]
+    if review_f:
+        shown = [t for t in shown if str(t.get("review_status")) in review_f]
+    if priority_f:
+        shown = [t for t in shown if str(t.get("review_priority")) in priority_f]
+    needle = (query or "").strip().lower()
+    if needle:
+        def haystack(t):
+            return " ".join(str(t.get(k, "")) for k in ("id", "rule_id", "rule_description", "agent_name", "ioc", "reviewer", "severity", "ai_verdict",
+                                                          "final_severity", "final_verdict", "llm_provider", "llm_model", "status")).lower()
+        shown = [t for t in shown if needle in haystack(t)]
+    shown = sorted(shown, key=lambda t: t.get("processed_at_utc", ""), reverse=True)
+
+    st.download_button("Ekspor CSV", tickets_to_csv(shown), "tiket_closed.csv", "text/csv", key="dl_closed_csv", disabled=not shown)
+    if not closed:
+        st.info("Belum ada tiket yang ditutup. Tiket muncul di sini setelah AI menutupnya atau analis menyelesaikan tiket 'Perlu manusia'.")
+        return
+    if not shown:
+        st.info("Tidak ada tiket yang cocok dengan filter.")
+        return
+
+    rows = [closed_row(t) for t in shown]
+    if view == "Tabel":
+        st.dataframe([{k: r[k] for k in chosen_cols} for r in rows], hide_index=True)
+    else:
+        for t, r in list(zip(shown, rows))[:30]:
+            with st.container(border=True):
+                st.markdown(f"**{r['Ticket']}**")
+                st.caption(f"{r['Status']} | {r['Priority']} | {r['Created']} UTC | Analyst: {r['Analyst']}")
+                k1, k2, k3 = st.columns(3)
+                k1.write(f"Threat (AI): {r['Threat (AI)']}")
+                k2.write(f"Final: {r['Final (reviewer)']}")
+                k3.write(f"Review: {r['Review']}")
+        if len(shown) > 30:
+            st.caption(f"Menampilkan 30 dari {len(shown)} tiket. Persempit dengan pencarian atau filter.")
+
+    labels = {t["id"]: f"{(t.get('processed_at_utc') or '')[:19]} | {t.get('rule_description') or '(tanpa deskripsi)'} | {t.get('ai_verdict')} / {t.get('severity')}" for t in shown}
+    ticket_id = st.selectbox("Buka tiket:", list(labels), format_func=labels.get, key="ct_pick")
+    render_ticket_detail(next(t for t in shown if t["id"] == ticket_id))
+
+
+# --- HALAMAN (dipilih dari menu di sidebar) ---
 
 # ==========================================
 # TAB: ALERT MANUAL
 # ==========================================
-with tab_manual:
+if page == "Alert Manual":
     with st.form("ioc_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -628,7 +816,7 @@ with tab_manual:
 # ==========================================
 # TAB: ALERT WAZUH
 # ==========================================
-with tab_wazuh:
+if page == "Alert Wazuh":
     wz_view = st.radio("Mode:", ["Tiket otomatis", "Ambil manual"], horizontal=True, key="wz_view")
     if wz_view == "Tiket otomatis":
         render_ticket_queue()
@@ -718,7 +906,13 @@ with tab_wazuh:
 # ==========================================
 # TAB: UJI SKENARIO (PEMBANDING MANUAL VS PLATFORM)
 # ==========================================
-with tab_scenario:
+if page == "Tiket Closed":
+    render_closed_tickets()
+
+if page == "API":
+    render_api_page()
+
+if page == "Uji Skenario":
     st.subheader("Uji Skenario")
     st.markdown("Setiap analis mengerjakan skenario yang sama pada dua kondisi: Manual (tanpa platform) dan Platform (CTI + laporan AI). Kunci jawaban tidak ditampilkan di tab ini.")
 
@@ -799,7 +993,7 @@ with tab_scenario:
 # ==========================================
 # TAB: EVALUASI
 # ==========================================
-with tab_eval:
+if page == "Evaluasi":
     st.subheader("Evaluasi")
     try:
         eval_trials = STORE.all()
@@ -914,7 +1108,7 @@ with tab_eval:
 # ==========================================
 # TAB: HISTORY (RIWAYAT ANALISIS)
 # ==========================================
-with tab_history:
+if page == "History":
     st.subheader("Riwayat Analisis")
     st.markdown("Data riwayat di bawah ini disimpan sementara dan akan hilang jika Anda refresh halaman.")
     
@@ -953,7 +1147,7 @@ with tab_history:
 # ==========================================
 # TAB: AUTOMATION (EXTRACT & DEFANG IoC)
 # ==========================================
-with tab_defang:
+if page == "Defang":
     st.subheader("Clean IoC Extractor & Defang")
     st.markdown("Ekstrak IP, URL, dan Domain otomatis.")
     
@@ -1021,7 +1215,7 @@ with tab_defang:
 # ==========================================
 # TAB: SHIFT HANDOVER SUMMARIZER
 # ==========================================
-with tab_shift:
+if page == "Shift Summarizer":
     st.subheader("Shift Handover Summarizer")
     st.markdown("Otomatis mengekstrak raw log tiket shift menjadi format template End of Shift Report.")
     
