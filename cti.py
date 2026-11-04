@@ -112,6 +112,9 @@ def query_urlscan(ioc, ioc_type, api_key, verify=True):
         if results:
             top_result = results[0]
             summary = {"latest_scan_url": top_result.get('result'), "verdicts": top_result.get('verdicts', {}), "task_time": top_result.get('task', {}).get('time')}
+            if not (summary["verdicts"] or {}).get("overall"):
+                # Hasil pencarian URLScan sering tanpa verdict. Tanpa catatan ini model menafsirkan "kosong" sebagai "bersih".
+                summary["note"] = "No verdict is included in this search result. Absence of a verdict is not evidence that the domain is safe or malicious."
             return json.dumps(summary, indent=2)
         return '{"message": "No previous scans found on URLScan."}'
     except Exception as e: return f'{{"error": "{str(e)}"}}'
@@ -188,7 +191,9 @@ def summarize_cti(source, result):
     if source == "AbuseIPDB":
         return "OK", f"confidence {data.get('abuseConfidenceScore', '?')}%, laporan {data.get('totalReports', '?')}"
     if source == "URLScan":
-        overall = data.get("verdicts", {}).get("overall", {})
+        overall = (data.get("verdicts") or {}).get("overall") or {}
+        if "malicious" not in overall and "score" not in overall:
+            return "Tidak ada data", f"scan ditemukan ({data.get('task_time') or 'waktu tidak diketahui'}) tetapi tanpa verdict; bukan bukti bersih maupun jahat"
         return "OK", f"verdict overall malicious={overall.get('malicious', '?')}, score={overall.get('score', '?')}"
     if source == "HybridAnalysis":
         return "OK", f"verdict {data.get('verdict', '?')}, threat_score {data.get('threat_score', '?')}"

@@ -23,6 +23,8 @@ Each one protects the validity of the thesis results.
 
 ## Gotchas
 
+- Navigation is a sidebar of buttons (`NAV` in `app.py`), not `st.tabs`: only the selected page is drawn, and Streamlit drops widget state for pages that are not drawn. Settings that must survive a page change (API keys, models, fallback, SSL) are copied forward at the top of each run, but only the keys in `_PERSIST_EXACT` / `_PERSIST_PREFIX`. Never copy forward every session key: rewriting a button's key (`nav_*`) makes Streamlit raise `StreamlitValueAssignmentNotAllowedError` the next time that button is drawn, so every menu click breaks. Give such widgets their default through `st.session_state.setdefault`, not `value=`.
+- AppTest flows pick a page with `at.session_state["page"] = "Tiket Closed"` and set keys with `api_vt`, `api_abuse`, `api_gemini`, ... in session state. Each flow draws one page, so check History or Evaluasi (ground-truth hiding) after switching to that page, not from the page you were on.
 - `app.py` uses CRLF line endings. Keep them; a whole-file diff hides the real change.
 - The report template (`SOC_ANALYST_ROLE` in `triage_prompt.py`) and `triage_report.py` change together: the `Conclusion:`, `Severity:`, `Closing Reason:` and `Description:` lines, the `LAYER 1/2/3` and `RECOMMENDATIONS` headings, and the parsers (`parse_ai_verdict`, `parse_layers`, `parse_severity`, ...). Run `tests/test_triage_report.py` and `tests/test_tickets.py` after either side changes.
 - `RESPONSE_ACTIONS` (`scenarios.py`) and the three starter scenarios are drafts, and the scenarios are synthetic with `validated: false`. Replace them once the supervisor or mentor agrees on the definitions and answer keys.
