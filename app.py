@@ -39,6 +39,9 @@ st.set_page_config(page_title="SOC Threat Intel @wildaan", page_icon="🛡️", 
 from theme import apply_theme
 apply_theme()
 
+st.title("🛡️ SOC Threat Inteligence Dashboard")
+st.markdown("Automation gathering threat Inteligence and report @wildaaan.")
+
 # --- AMBIL DATA DARI STREAMLIT SECRETS (Dengan Penanganan Error Lanjutan) ---
 ENV_GEMINI = ""
 ENV_GEMINI2 = ""
