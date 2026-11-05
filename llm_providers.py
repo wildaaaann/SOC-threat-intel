@@ -31,14 +31,17 @@ class LLMError(Exception):
     """Kegagalan satu penyedia yang layak dicoba ulang di penyedia lain."""
 
 
-def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
+def build_attempts(gemini_key, extra, fallback=True, gemini_model=None, gemini_fallback_models=None):
     """Susun urutan percobaan.
 
     `extra` = {nama_penyedia: {"key": ..., "model": ...}}. Penyedia tanpa key dilewati.
     `gemini_key` boleh satu string atau daftar key (mis. dari dua akun). Tiap key menjadi satu percobaan Gemini
     berurutan; semuanya tetap penyedia "Gemini" dengan model yang sama, jadi akurasinya sah digabung.
+    `gemini_fallback_models` (daftar nama) = model Gemini cadangan, dicoba setelah model utama gagal di semua key.
+    Urutannya per model: model utama (key #1, #2), lalu tiap model cadangan (key #1, #2). Tiap percobaan mencatat
+    modelnya sendiri, jadi akurasi tetap dihitung per model dan tidak pernah digabung.
     Gemini selalu pertama. Jika `fallback` False, hanya penyedia dan model pertama yang dipakai, termasuk semua
-    key-nya, karena memutar key tidak mengganti model.
+    key-nya, karena memutar key tidak mengganti model; model cadangan ikut dibuang.
     """
     attempts = []
     keys = [gemini_key] if isinstance(gemini_key, str) else list(gemini_key or [])
@@ -46,8 +49,15 @@ def build_attempts(gemini_key, extra, fallback=True, gemini_model=None):
     for key in keys:
         if key and key not in seen_keys:
             seen_keys.append(key)
-    for slot, key in enumerate(seen_keys, 1):
-        attempts.append({"provider": "Gemini", "model": (gemini_model or GEMINI_MODEL).strip(), "key": key, "kind": "gemini", "slot": f"#{slot}"})
+    primary = (gemini_model or GEMINI_MODEL).strip()
+    models = [primary]
+    for name in gemini_fallback_models or []:
+        name = (name or "").strip()
+        if name and name not in models:
+            models.append(name)
+    for model in models:
+        for slot, key in enumerate(seen_keys, 1):
+            attempts.append({"provider": "Gemini", "model": model, "key": key, "kind": "gemini", "slot": f"#{slot}"})
     for name, cfg in OPENAI_COMPATIBLE.items():
         entry = (extra or {}).get(name) or {}
         if entry.get("key"):

@@ -232,6 +232,24 @@ class MultiGeminiKeyTests(unittest.TestCase):
         self.assertEqual([a["provider"] for a in attempts], ["Gemini", "Gemini"])
         self.assertEqual(len(build_attempts("k1", EXTRA, fallback=False)), 1)
 
+    def test_fallback_models_follow_primary_per_model_then_key(self):
+        attempts = build_attempts(["k1", "k2"], {}, gemini_model="big", gemini_fallback_models=["small", " ", "big", "small"])
+        self.assertEqual([(a["model"], a["slot"]) for a in attempts],
+                         [("big", "#1"), ("big", "#2"), ("small", "#1"), ("small", "#2")])
+
+    def test_503_on_primary_model_falls_to_lower_gemini_model_and_logs_it(self):
+        def gem(p, k, m):
+            if m == "big":
+                raise RuntimeError("503 UNAVAILABLE high demand")
+            return "laporan"
+        text, used, log = run_chain("p", build_attempts(["k1"], EXTRA, gemini_model="big", gemini_fallback_models=["small"]), gem, **self.NO_WAIT)
+        self.assertEqual((text, used["provider"], used["model"]), ("laporan", "Gemini", "small"))
+        self.assertEqual([(r["Model"], r["Status"]) for r in log], [("big", "Gagal"), ("small", "OK")])
+
+    def test_no_fallback_drops_fallback_models(self):
+        attempts = build_attempts(["k1", "k2"], EXTRA, fallback=False, gemini_model="big", gemini_fallback_models=["small"])
+        self.assertEqual({a["model"] for a in attempts}, {"big"})
+
     def test_single_string_key_still_works(self):
         self.assertEqual([a["slot"] for a in build_attempts("gem", {})], ["#1"])
 

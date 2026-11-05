@@ -55,6 +55,7 @@ class Config:
     keys: dict = field(default_factory=dict)
     gemini_key: object = ()  # daftar key Gemini yang terisi (satu atau dua akun)
     gemini_model: str = ""
+    gemini_fallback_models: object = ()  # model Gemini cadangan, dicoba bila model utama gagal
     llm_extra: dict = field(default_factory=dict)
     llm_fallback: bool = True
     cache: object = None
@@ -90,6 +91,7 @@ def load_config(env):
         keys={"vt": env["VT_API_KEY"], "abuse": env.get("ABUSEIPDB_API_KEY", ""),
               "urlscan": env.get("URLSCAN_API_KEY", ""), "hybrid": env.get("HYBRID_API_KEY", "")},
         gemini_key=[k for k in (env.get("GEMINI_API_KEY", ""), env.get("GEMINI_API_KEY_2", "")) if k], gemini_model=env.get("GEMINI_MODEL", ""), llm_extra=llm_extra,
+        gemini_fallback_models=[m.strip() for m in env.get("GEMINI_FALLBACK_MODELS", "").split(",") if m.strip()],
         llm_fallback=env.get("WORKER_LLM_FALLBACK", "true").lower() in _TRUE,
     )
     cfg.cache = cti.CtiCache(cfg.cache_path, cfg.cache_ttl_s)
@@ -120,7 +122,7 @@ def process_alert(alert, cfg, *, post=requests.post, gemini_fn=None):
     gen = None
     if "error" not in ctx:
         fn = gemini_fn or (lambda prompt, key, model: gemini_generate(prompt, key, model, verify=cfg.verify))
-        gen = generate_report(ctx, build_attempts(cfg.gemini_key, cfg.llm_extra, cfg.llm_fallback, gemini_model=cfg.gemini_model), fn, cfg.verify, post=post)
+        gen = generate_report(ctx, build_attempts(cfg.gemini_key, cfg.llm_extra, cfg.llm_fallback, gemini_model=cfg.gemini_model, gemini_fallback_models=cfg.gemini_fallback_models), fn, cfg.verify, post=post)
     return build_ticket(alert, entities, ctx, gen, tls_verify=cfg.verify, processing_s=time.monotonic() - started)
 
 

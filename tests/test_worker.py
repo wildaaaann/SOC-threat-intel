@@ -266,5 +266,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(load_config(dict(env, GEMINI_API_KEY_2="y")).gemini_key, ["y"])
 
 
+    def test_gemini_fallback_models_are_parsed_from_a_comma_list(self):
+        self.assertEqual(load_config(dict(self.BASE, GEMINI_FALLBACK_MODELS=" a-model , ,b-model ")).gemini_fallback_models, ["a-model", "b-model"])
+        self.assertEqual(load_config(self.BASE).gemini_fallback_models, [])
+
 if __name__ == "__main__":
     unittest.main()
